@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+tests/output*/
+tests/qa_*/
+tests/*.rasx
+tests/*.pdf
+tests/*.npz
+tests/*.png
+tests/*.log
+tests/*.json
+*.rasx
+*.npz
+*.zip
+*_source/
