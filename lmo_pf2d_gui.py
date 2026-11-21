@@ -76,7 +76,11 @@ def run_script_mode(script: str, args: list[str]):
     allowed={"run_lmo_pf.py","reconstruct_poles.py","fit_poles.py","render_results.py"}
     if script not in allowed:
         raise ValueError("Unsupported worker script: "+script)
-    target=bundled("analysis/validated_single_point_scripts/"+script)
+    if len(args)>=2 and args[0]=='--stage-root':
+        target=pathlib.Path(args[1])/script
+        args=args[2:]
+    else:
+        target=bundled('analysis/validated_single_point_scripts/'+script)
     if not target.is_file():
         raise FileNotFoundError("Bundled worker not found: "+str(target))
     sys.argv=[str(target),*args]

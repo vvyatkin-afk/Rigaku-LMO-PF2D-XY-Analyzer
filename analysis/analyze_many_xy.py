@@ -91,7 +91,7 @@ def run_one(group,frames,root,work,dry):
     dest=root/'points'/point
     dest.parent.mkdir(parents=True,exist_ok=True)
     with (staged/'processing.log').open('w',encoding='utf-8') as f:
-        cmd=([sys.executable,'--script','run_lmo_pf.py'] if getattr(sys,'frozen',False) else [sys.executable,str(scripts/'run_lmo_pf.py')])
+        cmd=([sys.executable,'--script','run_lmo_pf.py','--stage-root',str(scripts)] if getattr(sys,'frozen',False) else [sys.executable,str(scripts/'run_lmo_pf.py')])
         rc=subprocess.run([*cmd,'--source',str(source),'--output',str(dest)],stdout=f,stderr=subprocess.STDOUT)
     if rc.returncode:raise RuntimeError('Prior validated reconstruction failed; see '+str(staged/'processing.log'))
     p=json.loads((dest/'analysis_results.json').read_text(encoding='utf-8'))['fits']['wide_t30_60_combined']
