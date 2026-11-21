@@ -33,7 +33,7 @@ jobs:
       - name: Publish versioned GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
-          GH_TOKEN: \${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release create "\${{ github.ref_name }}" dist/LMO-PF2D-Analyzer.exe --title "LMO PF2D Analyzer \${{ github.ref_name }}" --notes "Auto-detected RASX scan metadata. Draft 4° step flows require offline SmartLab validation before instrument use." --latest
+          gh release create "${{ github.ref_name }}" dist/LMO-PF2D-Analyzer.exe --title "LMO PF2D Analyzer ${{ github.ref_name }}" --notes "Auto-detected RASX scan metadata. Draft 4° step flows require offline SmartLab validation before instrument use." --latest
