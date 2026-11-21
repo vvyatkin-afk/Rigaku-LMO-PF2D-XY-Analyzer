@@ -89,3 +89,42 @@ Tested with a 360-frame, actual LMO (011) measurement. Peak centers in φ (deg) 
 `analysis/analyze_many_xy.py` – group validator, per-point PDF assembly, summary plots.
 
 `analysis/validated_single_point_scripts` – validated detector geometry and independent 2D/φ fits; invoked in isolated child processes to keep the GUI responsive.
+
+## v1.1.0 – Auto acquisition (2026-11-22)
+
+The new **Auto (step/continuous)** mode reads **actual RASX motor metadata** rather
+than assuming a 2° step, 360 frames or only two specified chi values. The
+original fixed-grid algorithm remains accessible in the GUI as **Legacy 2°**
+and on the CLI as \`--analyze-legacy\`.
+
+\`\`\`powershell
+LMO-PF2D-Analyzer.exe --inspect --source "D:\\Data\\LMO011"
+LMO-PF2D-Analyzer.exe --analyze --source "D:\\Data\\LMO011" --output "D:\\Data\\LMO011_NEW_RESULTS"
+\`\`\`
+
+Adaptive reconstruction uses the recorded Phi, Chi, X, Y, TwoTheta, Omega,
+HyPix geometry and actual frame scan windows. It detects 4° and 5°
+stationary acquisitions as well as continuous φ sweeps and checks for missing
+φ positions without silently inventing frames. Continuous data are integrated
+over the actual recorded angle window; stationary images are assigned their
+recorded angle. Outputs include acquisition.json, map.npz, peaks.csv/.json
+and a measured stereographic PF PDF for each accepted XY group.
+The old rigorous 360-frame calibration pipeline is preserved for direct
+comparison and independently verified legacy figures.
+
+**Calibration boundary**: This version supports only the validated
+HyPix-3000(H) horizontal 775×385 pixel geometry near LMO (011),
+2θ≈32.6°, ω≈16.3°, detector distance≈150.6 mm. It rejects inconsistent
+or incomplete input sets. Arbitrary detector geometry/phase, changing
+optics, in-plane LMO (200), 3D angular inversion, and missing sectors
+are not silently extrapolated.
+
+**Offline Flow proposal:** 4° step-and-shoot is **not instrument validated**.
+The native vendor Pole Figure(2D) activity must be opened in installed
+SmartLab Studio II to check whether 2D(Single exposure) is accepted
+and actually holds Phi fixed during every frame. Merely changing the XML
+scan-mode text is not proof of executable support. The Flow drafts are
+delivered with all hardware actions Skip=True. SaveMappingData=True is
+set only in the *offline draft*; on the instrument the operator must
+verify its output pathname and no overwrite behavior before enabling.
+Do not run unattended; inspect the optics/stage/pinhole collision constraints.

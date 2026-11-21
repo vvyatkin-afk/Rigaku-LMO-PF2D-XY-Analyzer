@@ -23,7 +23,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 TITLE="LMO PF2D Analyzer  |  HyPix-3000(H)"
 RASX_PATTERN=re.compile(
     r"^(?P<stem>.+)_image_(?P<seq>\d+)_(?P<chi>-?\d+(?:\.\d+)?)_(?P<num>\d+)\.rasx$",re.I)
@@ -33,43 +33,29 @@ def bundled(rel: str) -> pathlib.Path:
     return root/rel
 
 def scan_groups(folder: str | pathlib.Path) -> list[dict]:
-    """Quick filename-level inspection; physics-level checks happen in the worker."""
-    root=pathlib.Path(folder)
-    if not root.is_dir():
-        raise FileNotFoundError(f"Folder does not exist or is inaccessible: {root}")
-    groups: dict[str,list]=defaultdict(list)
-    unmatched=0
-    for entry in root.rglob("*.rasx"):
-        m=RASX_PATTERN.match(entry.name)
-        if m:
-            key=f"{entry.parent.relative_to(root)}__{m['stem']}"
-            groups[key].append((entry, int(m['seq']), float(m['chi']), int(m['num'])))
-        else:
-            unmatched+=1
+    """Infer phi step, scan mode and image counts from actual RASX metadata."""
+    lib=runpy.run_path(str(bundled("analysis/adaptive_pf2d.py")),run_name="_adaptive_")
+    groups,failures=lib["discover"](folder)
+    if not groups and failures:
+        raise ValueError("No calibrated detector frames; first error: "+failures[0]["error"])
     rows=[]
-    expected={(seq,chi,n) for seq,chi in ((1,38.0),(2,42.0)) for n in range(1,181)}
-    for key,items in sorted(groups.items(),key=lambda x:x[0].lower()):
-        indexes=[(s,c,n) for _,s,c,n in items]
-        actual=set(indexes)
-        counts=len(items)
-        ok=counts==360 and len(actual)==360 and actual==expected
-        xy=""
-        if items:
-            try:
-                with zipfile.ZipFile(items[0][0]) as z:
-                    header=ET.fromstring(z.read("Data0/MesurementConditions0.xml"))
-                    ax={v.get('Name'):v.get('Position') for v in header.findall("Axes/Axis")}
-                x=float(ax.get('X','nan'))
-                y=float(ax.get('Y','nan'))
-                xy=f"X={x:.2f}, Y={y:.2f} mm"
-            except Exception as exc:
-                xy=f"Metadata read failed: {type(exc).__name__}"
-        rows.append(dict(key=key,frames=counts,expected=360,
-                         ready=ok,chi38=sum(c==38 for _,_,c,_ in items),
-                         chi42=sum(c==42 for _,_,c,_ in items),
-                         x_y=xy))
-    if not rows and unmatched:
-        raise ValueError(f"{unmatched} RASX files found, but filenames are not in the supported format.")
+    for key,items in groups.items():
+        try:
+            bychi,info=lib["validate_group"](items)
+            ok=True
+            expected=sum(v.get("expected_unique_frames") or 0 for v in info.values())
+            mode=", ".join(f"{c}: {v['phi_step_deg']:.2f}° {v['mode']}"
+                           for c,v in info.items())
+        except Exception as e:
+            ok=False
+            expected=len(items)
+            mode="CHECK: "+str(e)[:120]
+        x=items[0].get("x")
+        y=items[0].get("y")
+        xy=f"X={x}, Y={y} mm | {mode}"
+        rows.append(dict(key=str(key),frames=len(items),expected=expected,ready=ok,
+                         chi38=sum(abs(v["chi"]-38)<.01 for v in items),
+                         chi42=sum(abs(v["chi"]-42)<.01 for v in items),x_y=xy))
     return rows
 
 def run_script_mode(script: str, args: list[str]):
@@ -87,9 +73,14 @@ def run_script_mode(script: str, args: list[str]):
     runpy.run_path(str(target),run_name="__main__")
 
 def run_analyze_mode(args: list[str]):
-    target=bundled("analysis/analyze_many_xy.py")
+    target=bundled("analysis/adaptive_pf2d.py")
     if not target.is_file():
         raise FileNotFoundError("Bundled analyzer not found: "+str(target))
+    sys.argv=[str(target),*args]
+    runpy.run_path(str(target),run_name="__main__")
+
+def run_legacy_mode(args: list[str]):
+    target=bundled("analysis/analyze_many_xy.py")
     sys.argv=[str(target),*args]
     runpy.run_path(str(target),run_name="__main__")
 
@@ -107,6 +98,7 @@ def make_gui():
             self.source=tk.StringVar()
             self.output_parent=tk.StringVar(value=str(pathlib.Path.home()/"Documents"))
             self.mode=tk.StringVar(value="single")
+            self.backend=tk.StringVar(value="adaptive")
             self.info=tk.StringVar(value="Выберите папку с файлами .rasx и нажмите «Проверить данные».")
             self.progress=tk.StringVar(value="Ожидание")
             self.rows=[]
@@ -160,6 +152,10 @@ def make_gui():
             ttk.Label(mode_row,text="Обработка",width=17).pack(side="left")
             ttk.Radiobutton(mode_row,text="Одна выбранная точка",variable=self.mode,value="single").pack(side="left",padx=(4,20))
             ttk.Radiobutton(mode_row,text="Все точки (пакет)",variable=self.mode,value="batch").pack(side="left")
+            ttk.Radiobutton(mode_row,text="Авто: step / continuous, шаг из RASX",
+                            variable=self.backend,value="adaptive").pack(side="left",padx=(4,18))
+            ttk.Radiobutton(mode_row,text="Legacy 2°",variable=self.backend,
+                            value="legacy").pack(side="left")
             ttk.Label(root,text="Обнаруженные точки / серии",style="Text.TLabel").pack(anchor="w",pady=(5,5))
             frame=ttk.Frame(root)
             frame.pack(fill="both",expand=True)
@@ -190,7 +186,7 @@ def make_gui():
             self.log=scrolledtext.ScrolledText(root,height=8,font=("Consolas",9),state="disabled",
                  background="#101c2c",foreground="#d7ebfb",insertbackground="#ffffff",wrap="word")
             self.log.pack(fill="both",expand=False)
-            self._log("Программа не управляет дифрактометром. Поддерживается геометрия примера Ивана: χ=38°/42°, φ шаг 2°.")
+            self._log("Программа не управляет дифрактометром. Авто-режим читает углы и число кадров из RASX.")
             self.protocol("WM_DELETE_WINDOW",self._close)
 
         def _log(self,line):
@@ -229,7 +225,7 @@ def make_gui():
                     r["frames"],r["chi38"],r["chi42"],r["x_y"],"Готово" if r["ready"] else "Неполно"))
             if items:self.tree.selection_set("0")
             ready=sum(r["ready"] for r in items)
-            self.info.set(f"Найдено серий: {len(items)}. Полных 360-кадровых: {ready}. "
+            self.info.set(f"Найдено серий: {len(items)}. Проверено по метаданным: {ready}. "
                           "Для контроля геометрии каждого кадра требуется запуск анализа.")
             self._log(self.info.get())
 
@@ -251,7 +247,7 @@ def make_gui():
                     messagebox.showwarning("Выбор","Выберите строку с нужной точкой.");return
                 chosen=self.rows[int(selected[0])]
                 if not chosen["ready"]:
-                    messagebox.showwarning("Неполная серия","Для выбранной точки нет полного набора из 360 кадров.");return
+                    messagebox.showwarning("Неполная серия","Данные не прошли проверку углов/метаданных.");return
                 args+=["--group-key",chosen["key"]]
             elif any(not r["ready"] for r in self.rows):
                 if not messagebox.askyesno("Неполные серии",
@@ -263,8 +259,9 @@ def make_gui():
             while dest.exists():
                 dest=parent/f"LMO_PF2D_{'ONE' if kind=='single' else 'BATCH'}_{stamp}_{n:02d}"
                 n+=1
-            cmd=[sys.executable,"--analyze",*args,"--output",str(dest)] if getattr(sys,"frozen",False) else [
-                sys.executable,str(pathlib.Path(__file__).resolve()),"--analyze",*args,"--output",str(dest)]
+            flag="--analyze" if self.backend.get()=="adaptive" else "--analyze-legacy"
+            cmd=[sys.executable,flag,*args,"--output",str(dest)] if getattr(sys,"frozen",False) else [
+                sys.executable,str(pathlib.Path(__file__).resolve()),flag,*args,"--output",str(dest)]
             self.report_dir=dest
             self.progress.set("Работает…")
             self.start_button.configure(state="disabled")
