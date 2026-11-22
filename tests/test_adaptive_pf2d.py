@@ -31,6 +31,27 @@ class AdaptiveAcquisitionTests(unittest.TestCase):
         rows=[dict(phi=0.,chi=38.,x=0.,y=0.,path='a'),dict(phi=4.,chi=38.,x=5.,y=0.,path='b')]
         groups=select_point_groups(rows)
         self.assertEqual(len(groups),2)
+    def test_flat_folder_position_suffixes_keep_39_points_separate(self):
+        rows=[]
+        for position in range(1,40):
+            for i in range(90):
+                rows.append(dict(phi=float(i*4),chi=38.,x=position*5.,y=0.,
+                    mode='SINGLE',sweep_deg=0.,
+                    path=f'/data/Ivan/batch/011_2D_LMO_011_batch_image_1_38.000_{i+1:03d}_{position:02d}.rasx'))
+        groups=select_point_groups(rows)
+        self.assertEqual(len(groups),39)
+        self.assertTrue(all(len(group)==90 for group in groups.values()))
+        self.assertEqual(len({key[3] for key in groups}),39)
+        self.assertTrue(all(infer_series(group)['complete_grid'] for group in groups.values()))
+
+    def test_original_filename_without_position_suffix_still_groups(self):
+        rows=[dict(phi=float(i*4),chi=38.,x=0.,y=0.,
+            path=f'/data/P001_LMO011_image_1_38.000_{i+1:03d}.rasx')
+            for i in range(90)]
+        groups=select_point_groups(rows)
+        self.assertEqual(len(groups),1)
+        self.assertIsNone(next(iter(groups))[3])
+
     def test_phi_normalization(self):
         self.assertEqual(normalize_phi(-4.),356.)
         self.assertEqual(normalize_phi(360.),0.)

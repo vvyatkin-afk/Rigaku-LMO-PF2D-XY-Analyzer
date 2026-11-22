@@ -23,7 +23,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 TITLE="LMO PF2D Analyzer  |  HyPix-3000(H)"
 RASX_PATTERN=re.compile(
     r"^(?P<stem>.+)_image_(?P<seq>\d+)_(?P<chi>-?\d+(?:\.\d+)?)_(?P<num>\d+)\.rasx$",re.I)

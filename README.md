@@ -90,6 +90,24 @@ Tested with a 360-frame, actual LMO (011) measurement. Peak centers in φ (deg) 
 
 `analysis/validated_single_point_scripts` – validated detector geometry and independent 2D/φ fits; invoked in isolated child processes to keep the GUI responsive.
 
+## v1.1.1 – Flat-folder 39-position Rigaku batches (2026-11-23)
+
+- Handles exported names such as `011_2D_LMO_011_batch_image_1_38.000_001_01.rasx`
+  where the *last* number is a separate acquisition/position suffix. Source files
+  are never renamed or modified. Grouping uses both this suffix and actual XY
+  coordinates recorded in the RASX motor metadata.
+- Works with all position series in a **single input folder**. Uses metadata to
+  verify the phi grid of each chi series; incomplete positions are clearly marked
+  FAILED instead of mixed or interpolated.
+- In Auto batch mode, creates `LMO011_XY_Overall_Report.pdf` and
+  `XY_summary.csv` with XY coordinates and per-pole beta, tilt and observed
+  phi/tilt widths, in addition to the individual pole figure PDFs.
+- In the GUI, choose the folder containing the exported RASX files, click
+  **Проверить данные**, select **Все точки (пакет)** and **Авто**, specify a
+  separate results directory, then click **Построить отчёт**.
+- Tested against synthesized naming/position metadata for 39 points; actual
+  2026-11-22 sample data were not remotely accessible for validation.
+
 ## v1.1.0 – Auto acquisition (2026-11-22)
 
 The new **Auto (step/continuous)** mode reads **actual RASX motor metadata** rather

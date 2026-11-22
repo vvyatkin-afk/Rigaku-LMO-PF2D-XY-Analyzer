@@ -89,16 +89,26 @@ def infer_series(rows):
       full_turn=full_turn,complete_grid=complete,phi_start_deg=min(unique),
       phi_max_deg=max(unique),sampled_positions_deg=unique)
 
+RASX_FRAME_NAME=re.compile(
+    r'^(?P<sample>.+)_image_(?P<seq>\d+)_(?P<chi>-?\d+(?:\.\d+)?)_(?P<frame>\d+)(?:_(?P<point>\d+))?$',
+    flags=re.I)
+
 def select_point_groups(rows):
-    """Group only by verified physical XY, source directory, and acquisition prefix."""
+    """Separate XY points even when SmartLab stores all RASX frames in one folder.
+
+    The trailing _01, _02, ... after the phi-frame index is an optional
+    acquisition/position suffix. It is *not* interpreted as a measured angle.
+    Actual X/Y coordinates are independently retained in the group key.
+    """
     groups=collections.defaultdict(list)
     for x in rows:
         p=pathlib.Path(x.get('path','unknown'))
-        # Do not infer positions from numerical frame order.
         xy=(round(float(x['x']),3) if x.get('x') is not None else None,
             round(float(x['y']),3) if x.get('y') is not None else None)
-        name=re.sub(r'_image_\d+_-?\d+(?:\.\d+)?_\d+$','',p.stem,flags=re.I)
-        key=(str(p.parent),name,xy)
+        match=RASX_FRAME_NAME.match(p.stem)
+        sample=match.group('sample') if match else p.stem
+        position_suffix=match.group('point') if match else None
+        key=(str(p.parent),sample,xy,position_suffix)
         groups[key].append(x)
     return dict(groups)
 
@@ -267,6 +277,88 @@ def report(out,rows,data,cov,info):
         pdf.savefig(fig);plt.close(fig)
     return peaks
 
+def write_batch_summary(out,records):
+    """Write a single per-position table and an observed-FWHM XY overview."""
+    fields=['point','position_suffix','x_mm','y_mm','frames','status','reason','mean_phi_fwhm_deg']
+    for i in range(1,5):
+        fields.extend([f'P{i}_status',f'P{i}_beta_deg',f'P{i}_tilt_deg',
+                       f'P{i}_phi_fwhm_deg',f'P{i}_tilt_fwhm_deg'])
+    rows=[]
+    for item in records:
+        row={field:item.get(field) for field in fields}
+        valid_widths=[]
+        for i,peak in enumerate(item.get('peaks',[])[:4],1):
+            row[f'P{i}_status']=peak.get('status')
+            row[f'P{i}_beta_deg']=peak.get('beta_deg')
+            row[f'P{i}_tilt_deg']=peak.get('tilt_deg')
+            row[f'P{i}_phi_fwhm_deg']=peak.get('phi_fwhm_observed_deg')
+            row[f'P{i}_tilt_fwhm_deg']=peak.get('tilt_fwhm_observed_deg')
+            if peak.get('status')=='OK' and peak.get('phi_fwhm_observed_deg') is not None:
+                value=float(peak['phi_fwhm_observed_deg'])
+                if math.isfinite(value):valid_widths.append(value)
+        if valid_widths:row['mean_phi_fwhm_deg']=sum(valid_widths)/len(valid_widths)
+        rows.append(row)
+    with (out/'XY_summary.csv').open('w',newline='',encoding='utf-8-sig') as f:
+        writer=csv.DictWriter(f,fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    with PdfPages(out/'LMO011_XY_Overall_Report.pdf') as pdf:
+        fig,ax=plt.subplots(figsize=(11.69,8.27))
+        ax.axis('off')
+        fig.text(.08,.89,'LMO (011) | Multi-position 2D pole figures',fontsize=20,weight='bold')
+        complete=sum(r['status']=='OK' for r in rows)
+        fig.text(.08,.79,f'Position groups: {len(rows)}  |  processed: {complete}  |  incomplete: {len(rows)-complete}',fontsize=13)
+        fig.text(.08,.67,'Positions are kept separate by RASX acquisition suffix and recorded X/Y.',fontsize=11)
+        fig.text(.08,.61,'Observed widths include instrument resolution and angular sampling.',fontsize=11)
+        fig.text(.08,.55,'No unmeasured angles or positions are interpolated.',fontsize=11)
+        fig.text(.08,.49,'Inspect individual point PDFs, peak statuses and acquisition.json.',fontsize=11)
+        fig.text(.08,.20,'Source RASX files read only; all results stored in a new folder.',fontsize=10)
+        pdf.savefig(fig);plt.close(fig)
+        good=[r for r in rows if r['status']=='OK' and r.get('mean_phi_fwhm_deg') is not None]
+        if good:
+            fig,ax=plt.subplots(figsize=(11.69,8.27))
+            xy_good=[r for r in good if r.get('x_mm') is not None and r.get('y_mm') is not None]
+            use_xy=len(xy_good)==len(good) and len({(r['x_mm'],r['y_mm']) for r in good})>1
+            if use_xy:
+                xx=[float(r['x_mm']) for r in good]
+                yy=[float(r['y_mm']) for r in good]
+                sc=ax.scatter(xx,yy,c=[r['mean_phi_fwhm_deg'] for r in good],
+                              s=115,cmap='viridis',edgecolors='black',linewidths=.3)
+                fig.colorbar(sc,ax=ax,label='Mean observed phi FWHM (degrees)')
+                for x,y,r in zip(xx,yy,good):
+                    ax.annotate(str(r.get('position_suffix') or r['point']), (x,y),
+                                xytext=(3,4),textcoords='offset points',fontsize=8)
+                ax.set(xlabel='Stage X (mm)',ylabel='Stage Y (mm)',
+                       title='Observed phi width across measured XY positions')
+            else:
+                ax.bar(range(1,len(good)+1),[r['mean_phi_fwhm_deg'] for r in good])
+                ax.set_xticks(range(1,len(good)+1),[str(r.get('position_suffix') or r['point']) for r in good],
+                              rotation=90,fontsize=8)
+                ax.set(xlabel='Measured position index',ylabel='Mean observed phi FWHM (degrees)',
+                       title='Observed phi width by position (distinct X/Y unavailable)')
+            ax.grid(alpha=.2)
+            fig.tight_layout()
+            pdf.savefig(fig);plt.close(fig)
+        for start in range(0,len(rows),16):
+            part=rows[start:start+16]
+            labels=['Pos','X','Y','Frames','Status','Mean FWHM']
+            body=[]
+            for r in part:
+                fw=r.get('mean_phi_fwhm_deg')
+                body.append([str(r.get('position_suffix') or r['point']),
+                      '' if r.get('x_mm') is None else str(r['x_mm']),
+                      '' if r.get('y_mm') is None else str(r['y_mm']),
+                      str(r['frames']),r['status'],
+                      '' if fw is None else f'{fw:.2f}'])
+            fig,ax=plt.subplots(figsize=(11.69,8.27))
+            ax.axis('off')
+            tab=ax.table(cellText=body,colLabels=labels,cellLoc='center',
+                         colWidths=[.11,.17,.17,.14,.17,.24],loc='center')
+            tab.auto_set_font_size(False);tab.set_fontsize(10);tab.scale(1,1.5)
+            ax.set_title('Measured XY positions and observed phi FWHM',fontsize=16,pad=16)
+            pdf.savefig(fig);plt.close(fig)
+    return rows
+
 def run(source,output,inspect=False,group_key=None):
     out=pathlib.Path(output)
     if out.exists():raise FileExistsError(f"Output must not exist: {out}")
@@ -279,7 +371,8 @@ def run(source,output,inspect=False,group_key=None):
     out.mkdir(parents=True)
     records=[]
     for i,(key,rows) in enumerate(groups.items(),1):
-        item=dict(point=i,source_group=str(key),frames=len(rows))
+        item=dict(point=i,source_group=str(key),frames=len(rows),
+                  position_suffix=key[3],x_mm=key[2][0],y_mm=key[2][1])
         try:
             series,info=validate_group(rows)
             item['acquisition']=info
@@ -294,8 +387,9 @@ def run(source,output,inspect=False,group_key=None):
         records.append(item)
     with (out/'inspection.json').open('w') as f:json.dump(dict(groups=records,rejected_files=failures),f,indent=2)
     with (out/'inspection.csv').open('w',newline='') as f:
-        w=csv.DictWriter(f,fieldnames=['point','source_group','frames','status','reason'],extrasaction='ignore')
+        w=csv.DictWriter(f,fieldnames=['point','position_suffix','x_mm','y_mm','source_group','frames','status','reason'],extrasaction='ignore')
         w.writeheader();w.writerows(records)
+    if not inspect:write_batch_summary(out,records)
     for item in records:print(item['point'],item['status'],item.get('reason',''),item['frames'])
     return 0 if all(q['status']=='OK' for q in records) else 2
 
