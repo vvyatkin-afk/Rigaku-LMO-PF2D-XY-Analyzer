@@ -90,6 +90,60 @@ Tested with a 360-frame, actual LMO (011) measurement. Peak centers in φ (deg) 
 
 `analysis/validated_single_point_scripts` – validated detector geometry and independent 2D/φ fits; invoked in isolated child processes to keep the GUI responsive.
 
+## v1.2.0 – Detailed four-pole reports and cached-map report rebuild (2026-11-23)
+
+This version addresses batch results from Ivan's 39-point LMO (011) measurements.
+The original `magma` pole figure palette is preserved.
+
+**Per-point PDF (4 pages)**: measured stereographic pole figure with fitted
+P1-P4 centers; detailed numeric parameter table including four azimuth and
+radial centers (`beta`, `t`), stereographic radius `r=tan(t/2)`,
+four observed FWHM(beta) and FWHM(t), and fit R2; eight measured/model cut
+charts (beta and radial t for each pole) using exactly the fitted 2D Gaussian
+parameters; four local 2D intensity maps with half-max fitted ellipses.
+The derived `peak_profile_cuts.csv`, `peaks.csv`, `peaks.json` and
+`structure_tilt.json` are saved beside each PDF.
+
+**Batch PDF and CSV**: XY maps for all four radial centers, all four
+azimuthal and radial widths and stereographic radii; all four width trends
+by measured position, a conditional structure-axis tilt map/direction;
+full-position numeric tables for beta centers, radial centers, both widths,
+stereographic radius, R2 and cone-fit tilt/direction/RMS. `XY_summary.csv`
+has **numeric** position IDs (`1`, `2`, …, `39`) rather than leading-zero
+text (`01`, `02`, …). All four values are exported separately.
+
+**Fast re-reporting without rescanning a gigabyte of RASX**:
+
+1. Open the updated Windows EXE (close the previous version first).
+2. Click **Новые PDF из готового расчёта**.
+3. Select the earlier `LMO_PF2D_BATCH_...` folder that contains
+   `inspection.json` and `point_001/map.npz` etc.
+4. Set a separate parent folder for outputs, if necessary. The program
+   creates a **new** `LMO_PF2D_REPORTS_...` folder.
+5. Open `LMO011_XY_Overall_Report.pdf`; the per-point PDFs are under
+   `point_001/ ... point_039/`.
+
+No raw RASX are read or modified in this path. The 2D Gaussian parameters
+are refitted on the **stored measured maps** in the prior batch. This means
+each fitted cut shown in the PDF corresponds to the currently exported
+widths, not to a different independent 1D fit. The source batch result
+folder also remains read-only.
+
+CLI:
+
+```powershell
+LMO-PF2D-Analyzer.exe --analyze --reports-only --source "D:\Results\LMO_PF2D_BATCH_20261123_034719" --output "D:\Results\LMO_PF2D_REPORTS_NEW"
+```
+
+**Scientific interpretation**: The optional cone-axis tilt follows the
+best-fit normal to a plane of four scattering-vector directions computed
+from the four measured beta and t centers. It assumes the four peaks
+belong to an equivalent cone. Its direction is in *instrument beta*, not
+the tape longitudinal coordinate system; it is **not** an instrument
+alignment-corrected tape tilt. RMS of the cone model is reported for QC.
+All observed FWHM include detector/motor broadening; no instrumental
+deconvolution is claimed. Incomplete data are explicitly marked FAILED.
+
 ## v1.1.2 – Responsive 5-second scan progress (2026-11-23)
 
 The Windows GUI's **Проверить данные** button now reports progress at roughly

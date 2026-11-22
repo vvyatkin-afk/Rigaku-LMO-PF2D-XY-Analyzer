@@ -10,6 +10,8 @@ import datetime as dt
 import json
 import math
 import pathlib
+import runpy
+import shutil
 import re
 import sys
 import zipfile
@@ -253,140 +255,73 @@ def reconstruct(rows,output):
                         tilt=np.arange(90)+.5,azimuth=np.arange(180)*2+1)
     return data,coverage,info
 
-def report(out,rows,data,cov,info):
-    with (out/'acquisition.json').open('w',encoding='utf-8') as f:
-        json.dump(dict(n_frames=len(rows),per_chi=info,xy=dict(x=rows[0].get('x'),y=rows[0].get('y')),
-          method='Acquisition-aware pixel projection; five-point quadrature for continuous angle sweep; stationary positions unbroadened; unmeasured cells masked',
-          limitations='Only calibrated 775x385 HyPix horizontal LMO(011) geometry; no detector-geometry extrapolation; no crystallographic symmetry; no correction for motor alignment tilt.'),f,indent=2)
+_rich_cache=None
+
+def rich_reports():
+    global _rich_cache
+    if _rich_cache is None:
+        script=pathlib.Path(__file__).with_name("rich_reports.py")
+        if not script.is_file():raise FileNotFoundError(f"Rich reports module missing: {script}")
+        _rich_cache=runpy.run_path(str(script),run_name="_rich_reports_")
+    return _rich_cache
+
+def report(out,rows,data,cov,info,frame_count=None,original_acquisition=None):
+    """Independent 2D Gaussian fits; all reports use exactly these parameters."""
+    frame_count=len(rows) if frame_count is None else int(frame_count)
+    acquisition=(dict(original_acquisition) if original_acquisition else dict(
+        n_frames=frame_count,per_chi=info,
+        xy=dict(x=rows[0].get("x"),y=rows[0].get("y")),
+        method="Acquisition-aware pixel projection; measured Phi/Chi; five-point quadrature for continuous sweep",
+        limitations="Validated LMO(011) HyPix horizontal only. No instrumental or tape-axis calibration."))
+    acquisition["n_frames"]=frame_count
+    with (out/"acquisition.json").open("w",encoding="utf-8") as f:
+        json.dump(acquisition,f,indent=2,ensure_ascii=False)
     peaks=[]
-    for seed in [82.,177.,272.,357.]:
-        tilt,az=np.meshgrid(np.arange(90)+.5,np.arange(180)*2+1,indexing='ij')
-        beta=((az-seed+180)%360)-180
+    tilt,az=np.meshgrid(np.arange(90)+.5,np.arange(180)*2+1,indexing="ij")
+    for seed in (82.,177.,272.,357.):
+        beta=((az-seed+180.)%360.)-180.
         mask=np.isfinite(data)&(tilt>=30)&(tilt<=60)&(np.abs(beta)<25)&(cov>0)
         if mask.sum()<12:
-            peaks.append(dict(seed=seed,status='INSUFFICIENT_COVERAGE'));continue
+            peaks.append(dict(seed=seed,status="INSUFFICIENT_COVERAGE"));continue
         x=beta[mask];y=tilt[mask];z=data[mask]
-        med=float(np.nanmedian(z));peakid=int(np.nanargmax(z))
-        def fn(p):
+        med=float(np.nanmedian(z))
+        peakid=int(np.nanargmax(z))
+        def residual(p):
             amp,b0,t0,sb,st,bg=p
             model=amp*np.exp(-.5*((x-b0)/sb)**2-.5*((y-t0)/st)**2)+bg
             return model-z
         initial=[max(float(z.max()-med),1.),float(x[peakid]),float(y[peakid]),5.,3.,med]
         try:
-            q=least_squares(fn,initial,bounds=([0,-20,25,.5,.5,-np.inf],[np.inf,20,65,25,20,np.inf]),max_nfev=500)
-            a,b0,t0,sb,st,bg=q.x
-            peaks.append(dict(seed=seed,status='OK' if q.success else 'FIT_WARNING',beta_deg=(seed+b0)%360,
-                 tilt_deg=t0,phi_fwhm_observed_deg=sb*2*np.sqrt(2*np.log(2)),
-                 tilt_fwhm_observed_deg=st*2*np.sqrt(2*np.log(2)),amplitude=a,n_bins=int(mask.sum())))
-        except Exception as e:peaks.append(dict(seed=seed,status='FIT_FAILED',error=str(e)))
-    with (out/'peaks.json').open('w') as f:json.dump(peaks,f,indent=2)
-    with (out/'peaks.csv').open('w',newline='') as f:
-        keys=sorted(set().union(*(p.keys() for p in peaks)));w=csv.DictWriter(f,fieldnames=keys);w.writeheader();w.writerows(peaks)
-    with PdfPages(out/'LMO011_adaptive_pole_figure.pdf') as pdf:
-        fig,ax=plt.subplots(figsize=(8,7),subplot_kw=dict(projection='polar'))
-        ang=np.deg2rad(np.arange(180)*2+1)
-        rad=np.tan(np.deg2rad(np.arange(90)+.5)/2)
-        beta,rr=np.meshgrid(ang,rad)
-        masked=np.ma.masked_invalid(data)
-        im=ax.pcolormesh(beta,rr,masked,shading='nearest',cmap='magma')
-        ax.set_ylim(0,np.tan(np.deg2rad(70)/2))
-        ax.set_title(f"LMO(011) 2D pole figure | {len(rows)} frames | X={rows[0].get('x')} Y={rows[0].get('y')}")
-        fig.colorbar(im,ax=ax,shrink=.7,label='background-subtracted counts per contributing detector pixel')
-        fig.tight_layout();pdf.savefig(fig);plt.close(fig)
-        fig,ax=plt.subplots(figsize=(10,6));ax.axis('off')
-        ax.set_title("Acquisition inferred from RASX motor and scan metadata",fontsize=15)
-        lines=[f"Chi {k} degrees: {v['n_frames']} frames, {v['mode']}, "
-               f"phi step {v['phi_step_deg']} deg, sweep {v['observed_sweep_deg']} deg"
-               for k,v in info.items()]
-        lines+=["", "Four independent local Gaussian fits (uncorrected observed FWHM):"]
-        lines += [json.dumps(p,ensure_ascii=False) for p in peaks]
-        lines += ["", "Unmeasured map cells stay empty. No forced symmetry.",
-                  "Stationary acquisition and continuous-angle-integrated frames are treated differently."]
-        ax.text(.04,.92,"\n".join(lines),va='top',fontsize=9,family='monospace',transform=ax.transAxes)
-        pdf.savefig(fig);plt.close(fig)
+            q=least_squares(residual,initial,
+                bounds=([0.,-20.,25.,.5,.5,-np.inf],[np.inf,20.,65.,25.,20.,np.inf]),
+                max_nfev=500)
+            amp,b0,t0,sb,st,bg=[float(v) for v in q.x]
+            err=residual(q.x)
+            sse=float(np.sum(err**2))
+            total=float(np.sum((z-np.mean(z))**2))
+            r2=float(1.-sse/total) if total>1e-14 else None
+            factor=2.*math.sqrt(2.*math.log(2.))
+            peaks.append(dict(
+                seed=float(seed),status="OK" if q.success else "FIT_WARNING",
+                beta_deg=float((seed+b0)%360.),tilt_deg=t0,
+                phi_fwhm_observed_deg=sb*factor,
+                tilt_fwhm_observed_deg=st*factor,
+                sigma_beta_deg=sb,sigma_tilt_deg=st,
+                amplitude=amp,background=bg,n_bins=int(mask.sum()),
+                fit_r2=r2,fit_rmse=math.sqrt(sse/len(z))))
+        except Exception as e:
+            peaks.append(dict(seed=float(seed),status="FIT_FAILED",error=str(e)))
+    with (out/"peaks.json").open("w",encoding="utf-8") as f:
+        json.dump(peaks,f,indent=2,ensure_ascii=False)
+    with (out/"peaks.csv").open("w",newline="",encoding="utf-8-sig") as f:
+        headers=sorted(set().union(*(p.keys() for p in peaks)))
+        w=csv.DictWriter(f,fieldnames=headers);w.writeheader();w.writerows(peaks)
+    rich_reports()["write_point_report"](out,rows,data,cov,info,peaks,frame_count)
     return peaks
 
 def write_batch_summary(out,records):
-    """Write a single per-position table and an observed-FWHM XY overview."""
-    fields=['point','position_suffix','x_mm','y_mm','frames','status','reason','mean_phi_fwhm_deg']
-    for i in range(1,5):
-        fields.extend([f'P{i}_status',f'P{i}_beta_deg',f'P{i}_tilt_deg',
-                       f'P{i}_phi_fwhm_deg',f'P{i}_tilt_fwhm_deg'])
-    rows=[]
-    for item in records:
-        row={field:item.get(field) for field in fields}
-        valid_widths=[]
-        for i,peak in enumerate(item.get('peaks',[])[:4],1):
-            row[f'P{i}_status']=peak.get('status')
-            row[f'P{i}_beta_deg']=peak.get('beta_deg')
-            row[f'P{i}_tilt_deg']=peak.get('tilt_deg')
-            row[f'P{i}_phi_fwhm_deg']=peak.get('phi_fwhm_observed_deg')
-            row[f'P{i}_tilt_fwhm_deg']=peak.get('tilt_fwhm_observed_deg')
-            if peak.get('status')=='OK' and peak.get('phi_fwhm_observed_deg') is not None:
-                value=float(peak['phi_fwhm_observed_deg'])
-                if math.isfinite(value):valid_widths.append(value)
-        if valid_widths:row['mean_phi_fwhm_deg']=sum(valid_widths)/len(valid_widths)
-        rows.append(row)
-    with (out/'XY_summary.csv').open('w',newline='',encoding='utf-8-sig') as f:
-        writer=csv.DictWriter(f,fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(rows)
-    with PdfPages(out/'LMO011_XY_Overall_Report.pdf') as pdf:
-        fig,ax=plt.subplots(figsize=(11.69,8.27))
-        ax.axis('off')
-        fig.text(.08,.89,'LMO (011) | Multi-position 2D pole figures',fontsize=20,weight='bold')
-        complete=sum(r['status']=='OK' for r in rows)
-        fig.text(.08,.79,f'Position groups: {len(rows)}  |  processed: {complete}  |  incomplete: {len(rows)-complete}',fontsize=13)
-        fig.text(.08,.67,'Positions are kept separate by RASX acquisition suffix and recorded X/Y.',fontsize=11)
-        fig.text(.08,.61,'Observed widths include instrument resolution and angular sampling.',fontsize=11)
-        fig.text(.08,.55,'No unmeasured angles or positions are interpolated.',fontsize=11)
-        fig.text(.08,.49,'Inspect individual point PDFs, peak statuses and acquisition.json.',fontsize=11)
-        fig.text(.08,.20,'Source RASX files read only; all results stored in a new folder.',fontsize=10)
-        pdf.savefig(fig);plt.close(fig)
-        good=[r for r in rows if r['status']=='OK' and r.get('mean_phi_fwhm_deg') is not None]
-        if good:
-            fig,ax=plt.subplots(figsize=(11.69,8.27))
-            xy_good=[r for r in good if r.get('x_mm') is not None and r.get('y_mm') is not None]
-            use_xy=len(xy_good)==len(good) and len({(r['x_mm'],r['y_mm']) for r in good})>1
-            if use_xy:
-                xx=[float(r['x_mm']) for r in good]
-                yy=[float(r['y_mm']) for r in good]
-                sc=ax.scatter(xx,yy,c=[r['mean_phi_fwhm_deg'] for r in good],
-                              s=115,cmap='viridis',edgecolors='black',linewidths=.3)
-                fig.colorbar(sc,ax=ax,label='Mean observed phi FWHM (degrees)')
-                for x,y,r in zip(xx,yy,good):
-                    ax.annotate(str(r.get('position_suffix') or r['point']), (x,y),
-                                xytext=(3,4),textcoords='offset points',fontsize=8)
-                ax.set(xlabel='Stage X (mm)',ylabel='Stage Y (mm)',
-                       title='Observed phi width across measured XY positions')
-            else:
-                ax.bar(range(1,len(good)+1),[r['mean_phi_fwhm_deg'] for r in good])
-                ax.set_xticks(range(1,len(good)+1),[str(r.get('position_suffix') or r['point']) for r in good],
-                              rotation=90,fontsize=8)
-                ax.set(xlabel='Measured position index',ylabel='Mean observed phi FWHM (degrees)',
-                       title='Observed phi width by position (distinct X/Y unavailable)')
-            ax.grid(alpha=.2)
-            fig.tight_layout()
-            pdf.savefig(fig);plt.close(fig)
-        for start in range(0,len(rows),16):
-            part=rows[start:start+16]
-            labels=['Pos','X','Y','Frames','Status','Mean FWHM']
-            body=[]
-            for r in part:
-                fw=r.get('mean_phi_fwhm_deg')
-                body.append([str(r.get('position_suffix') or r['point']),
-                      '' if r.get('x_mm') is None else str(r['x_mm']),
-                      '' if r.get('y_mm') is None else str(r['y_mm']),
-                      str(r['frames']),r['status'],
-                      '' if fw is None else f'{fw:.2f}'])
-            fig,ax=plt.subplots(figsize=(11.69,8.27))
-            ax.axis('off')
-            tab=ax.table(cellText=body,colLabels=labels,cellLoc='center',
-                         colWidths=[.11,.17,.17,.14,.17,.24],loc='center')
-            tab.auto_set_font_size(False);tab.set_fontsize(10);tab.scale(1,1.5)
-            ax.set_title('Measured XY positions and observed phi FWHM',fontsize=16,pad=16)
-            pdf.savefig(fig);plt.close(fig)
-    return rows
+    """Numeric IDs, four polar coordinates and widths, cone tilt and visual maps."""
+    return rich_reports()["write_batch_report"](out,records)
 
 def run(source,output,inspect=False,group_key=None):
     out=pathlib.Path(output)
@@ -401,7 +336,7 @@ def run(source,output,inspect=False,group_key=None):
     records=[]
     for i,(key,rows) in enumerate(groups.items(),1):
         item=dict(point=i,source_group=str(key),frames=len(rows),
-                  position_suffix=key[3],x_mm=key[2][0],y_mm=key[2][1])
+                  position_suffix=(int(key[3]) if key[3] is not None else None),x_mm=key[2][0],y_mm=key[2][1])
         try:
             series,info=validate_group(rows)
             item['acquisition']=info
@@ -422,6 +357,71 @@ def run(source,output,inspect=False,group_key=None):
     for item in records:print(item['point'],item['status'],item.get('reason',''),item['frames'])
     return 0 if all(q['status']=='OK' for q in records) else 2
 
+def rebuild_reports_only(source,output):
+    """Replot existing map.npz and acquisition.json WITHOUT opening raw RASX.
+
+    Regenerates all Gaussian fits from the measured reconstructed 2D maps.
+    Output must not exist and MUST be separate from the existing result folder.
+    """
+    source=pathlib.Path(source)
+    out=pathlib.Path(output)
+    if out.exists():raise FileExistsError(f"Output must not exist: {out}")
+    meta=source/"inspection.json"
+    if not meta.is_file():raise FileNotFoundError(f"Existing batch inspection.json not found: {meta}")
+    info=json.loads(meta.read_text(encoding="utf-8"))
+    original=info.get("groups",[])
+    if not original:raise ValueError("No recorded groups in inspection.json")
+    out.mkdir(parents=True)
+    rows=[]
+    n_groups=len(original)
+    for ordinal,old in enumerate(original,1):
+        item=dict(old)
+        item["point"]=int(old.get("point",ordinal))
+        point=int(item["point"])
+        suffix=item.get("position_suffix")
+        item["position_suffix"]=int(suffix) if suffix not in (None,"") else None
+        item["status"]=old.get("status","FAILED")
+        if item["status"]!="OK":
+            rows.append(item)
+            print(f"REPORT {ordinal}/{n_groups}: point {point} unavailable",flush=True)
+            continue
+        src=source/f"point_{point:03d}"
+        dest=out/f"point_{point:03d}"
+        try:
+            if not (src/"map.npz").is_file():
+                raise FileNotFoundError(f"Saved map missing: {src/'map.npz'}")
+            acq=json.loads((src/"acquisition.json").read_text(encoding="utf-8"))
+            with np.load(src/"map.npz",allow_pickle=False) as z:
+                data=z["intensity"].copy()
+                cov=z["coverage"].copy()
+            if data.shape!=(90,180) or cov.shape!=data.shape:
+                raise ValueError("Unsupported saved map shape; raw data left untouched")
+            dest.mkdir()
+            shutil.copy2(src/"map.npz",dest/"map.npz")
+            n_frames=int(acq.get("n_frames",item.get("frames",0)))
+            x=item.get("x_mm",acq.get("xy",{}).get("x"))
+            y=item.get("y_mm",acq.get("xy",{}).get("y"))
+            dummy=[dict(x=x,y=y)]
+            p=report(dest,dummy,data,cov,acq.get("per_chi",{}),
+                     frame_count=n_frames,original_acquisition=acq)
+            item["peaks"]=p
+            item["status"]="OK"
+        except Exception as e:
+            item.update(status="FAILED",reason=f"Reports-only rebuild: {e}")
+        rows.append(item)
+        print(f"REPORT {ordinal}/{n_groups}: point {point} {item['status']}",flush=True)
+    with (out/"inspection.json").open("w",encoding="utf-8") as f:
+        json.dump(dict(groups=rows,rejected_files=info.get("rejected_files",[]),
+                       reports_only_source=str(source)),f,indent=2,ensure_ascii=False)
+    with (out/"inspection.csv").open("w",newline="",encoding="utf-8-sig") as f:
+        cols=["point","position_suffix","x_mm","y_mm","frames","status","reason"]
+        w=csv.DictWriter(f,fieldnames=cols,extrasaction="ignore")
+        w.writeheader();w.writerows(rows)
+    write_batch_summary(out,rows)
+    bad=sum(r.get("status")!="OK" for r in rows)
+    print(f"REPORTS_READY: {out}, OK={len(rows)-bad}, FAILED={bad}",flush=True)
+    return 0 if bad==0 else 2
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source',required=True)
@@ -429,6 +429,7 @@ def main():
     p.add_argument('--inspect',action='store_true')
     p.add_argument('--group-key',default=None)
     args=p.parse_args()
+    if args.reports_only:raise SystemExit(rebuild_reports_only(args.source,args.output))
     raise SystemExit(run(args.source,args.output,args.inspect,args.group_key))
 
 if __name__=='__main__':main()

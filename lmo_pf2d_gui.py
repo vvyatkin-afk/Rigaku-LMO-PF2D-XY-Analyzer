@@ -24,7 +24,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-VERSION="1.1.2"
+VERSION="1.2.0"
 TITLE="LMO PF2D Analyzer  |  HyPix-3000(H)"
 RASX_PATTERN=re.compile(
     r"^(?P<stem>.+)_image_(?P<seq>\d+)_(?P<chi>-?\d+(?:\.\d+)?)_(?P<num>\d+)\.rasx$",re.I)
@@ -234,6 +234,8 @@ def make_gui():
             action.pack(fill="x",pady=(0,8))
             self.start_button=ttk.Button(action,text="▶  Построить отчёт",style="Action.TButton",command=self._start)
             self.start_button.pack(side="left",padx=(0,9))
+            self.rebuild_button=ttk.Button(action,text="Новые PDF из готового расчёта",command=self._rebuild_reports)
+            self.rebuild_button.pack(side="left",padx=(0,9))
             self.cancel_button=ttk.Button(action,text="Остановить",command=self._cancel,state="disabled")
             self.cancel_button.pack(side="left",padx=(0,9))
             ttk.Button(action,text="Открыть результаты",command=self._open_report).pack(side="left")
@@ -275,6 +277,7 @@ def make_gui():
             self.progress.set("Проверка RASX…")
             self.scan_button.configure(state="disabled")
             self.start_button.configure(state="disabled")
+            self.rebuild_button.configure(state="disabled")
             self._log("ПРОВЕРКА НАЧАТА: исходные RASX только читаются; статус каждые 5 с.")
             def on_progress(snapshot):
                 # Worker changes a plain immutable snapshot. Only the GUI thread touches Tk.
@@ -345,13 +348,40 @@ def make_gui():
             flag="--analyze" if self.backend.get()=="adaptive" else "--analyze-legacy"
             cmd=[sys.executable,flag,*args,"--output",str(dest)] if getattr(sys,"frozen",False) else [
                 sys.executable,str(pathlib.Path(__file__).resolve()),flag,*args,"--output",str(dest)]
+            self._launch_worker(cmd,dest,"Исходный набор RASX: "+("одна точка" if kind=="single" else "все точки"))
+
+        def _rebuild_reports(self):
+            """Reconstruct rich PDFs from saved maps in an existing batch result folder."""
+            if self.worker is not None or self.scan_active:return
+            source=filedialog.askdirectory(title="Выберите готовую папку LMO_PF2D_BATCH_...",
+                                             initialdir=self.source.get() or str(pathlib.Path.home()))
+            if not source:return
+            if not (pathlib.Path(source)/"inspection.json").is_file():
+                messagebox.showerror("Нет готовых данных","В этой папке не найден inspection.json.\nВыберите каталог LMO_PF2D_BATCH_... с папками point_001 и map.npz.")
+                return
+            parent=pathlib.Path(self.output_parent.get().strip().strip('"'))
+            if not parent.is_dir():
+                messagebox.showerror("Ошибка","Укажите существующую папку для новых PDF.");return
+            stamp=dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            dest=parent/f"LMO_PF2D_REPORTS_{stamp}"
+            idx=1
+            while dest.exists():
+                dest=parent/f"LMO_PF2D_REPORTS_{stamp}_{idx:02d}"
+                idx+=1
+            args=["--analyze","--reports-only","--source",str(source),"--output",str(dest)]
+            cmd=([sys.executable,*args] if getattr(sys,"frozen",False) else
+                 [sys.executable,str(pathlib.Path(__file__).resolve()),*args])
+            self._launch_worker(cmd,dest,"Только отчёты из сохранённых 2D-карт; RASX не читаются")
+
+        def _launch_worker(self,cmd,dest,description):
             self.report_dir=dest
-            self.progress.set("Работает…")
+            self.progress.set("Строятся отчёты…")
             self.start_button.configure(state="disabled")
             self.scan_button.configure(state="disabled")
+            self.rebuild_button.configure(state="disabled")
             self.cancel_button.configure(state="normal")
             self._log("\nНАЧАЛО: "+str(dest))
-            self._log("Режим: "+("одна точка" if kind=="single" else "весь пакет"))
+            self._log("Режим: "+description)
             def task():
                 try:
                     flags=getattr(subprocess,"CREATE_NO_WINDOW",0)
@@ -395,6 +425,7 @@ def make_gui():
             self.worker=None
             self.start_button.configure(state="normal")
             self.scan_button.configure(state="normal")
+            self.rebuild_button.configure(state="normal")
             self.cancel_button.configure(state="disabled")
             self.progress.set("Готово" if rc==0 else f"Ошибка / код {rc}")
             path=self.report_dir
@@ -411,12 +442,14 @@ def make_gui():
                     self.scan_active=False
                     self.scan_button.configure(state="normal")
                     self.start_button.configure(state="normal")
+                    self.rebuild_button.configure(state="normal")
                     self.progress.set("Проверка завершена")
                     self._display_scan(payload)
                 elif kind=="scan_error":
                     self.scan_active=False
                     self.scan_button.configure(state="normal")
                     self.start_button.configure(state="normal")
+                    self.rebuild_button.configure(state="normal")
                     self.progress.set("Ошибка проверки")
                     self.info.set("Ошибка проверки: "+payload)
                     self._log("Ошибка проверки: "+payload)
