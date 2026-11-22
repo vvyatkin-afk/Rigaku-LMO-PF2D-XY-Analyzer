@@ -52,6 +52,37 @@ class AdaptiveAcquisitionTests(unittest.TestCase):
         self.assertEqual(len(groups),1)
         self.assertIsNone(next(iter(groups))[3])
 
+    def test_discover_progress_snapshots_include_failures(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+        from analysis.adaptive_pf2d import discover
+
+        with TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            for filename in ("sample_image_1_38.000_001_01.rasx",
+                             "sample_image_1_38.000_002_01.rasx",
+                             "bad.rasx"):
+                (root/filename).touch()
+            def fake_header(path):
+                if path.name=="bad.rasx":
+                    raise ValueError("bad header")
+                return dict(x=0.,y=0.,chi=38.,phi=0.)
+            snapshots=[]
+            with patch("analysis.adaptive_pf2d.parse_rasx_header",side_effect=fake_header):
+                groups,errors=discover(root,progress=snapshots.append)
+        self.assertEqual(len(groups),1)
+        self.assertEqual(len(errors),1)
+        self.assertIn("enumerate",[s['stage'] for s in snapshots])
+        self.assertIn("headers",[s['stage'] for s in snapshots])
+        final=snapshots[-1]
+        self.assertEqual(final['stage'],'group_done')
+        self.assertEqual(final['total'],3)
+        self.assertEqual(final['checked'],3)
+        self.assertEqual(final['accepted'],2)
+        self.assertEqual(final['rejected'],1)
+        self.assertIn("sample_image",final['last_ok'])
+
     def test_phi_normalization(self):
         self.assertEqual(normalize_phi(-4.),356.)
         self.assertEqual(normalize_phi(360.),0.)

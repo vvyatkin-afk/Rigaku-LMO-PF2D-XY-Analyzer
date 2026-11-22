@@ -90,6 +90,24 @@ Tested with a 360-frame, actual LMO (011) measurement. Peak centers in φ (deg) 
 
 `analysis/validated_single_point_scripts` – validated detector geometry and independent 2D/φ fits; invoked in isolated child processes to keep the GUI responsive.
 
+## v1.1.2 – Responsive 5-second scan progress (2026-11-23)
+
+The Windows GUI's **Проверить данные** button now reports progress at roughly
+five-second intervals while checking large remote RASX folders, including:
+- Stage: initial setup, finding files, sorting, reading RASX motor/header
+  metadata, grouping by XY and filename suffix, validating chi/phi series
+- Discovered and processed file counts (e.g., `1450/7020`)
+- Header files successfully read, failures, the file being read, and the
+  last successfully read filename
+- Completed/valid group counts for the final per-position validation
+- Elapsed time even when a single slow SMB file read temporarily stalls;
+  all feedback is generated on the GUI thread rather than a network worker
+
+The source RASX files remain read-only. While checking, the **Построить отчёт**
+button is disabled until the scan finishes. This update does not change
+the scientific reconstruction/calibration algorithm or accelerate remote SMB
+storage; it makes slow scans observable.
+
 ## v1.1.1 – Flat-folder 39-position Rigaku batches (2026-11-23)
 
 - Handles exported names such as `011_2D_LMO_011_batch_image_1_38.000_001_01.rasx`

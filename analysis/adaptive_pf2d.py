@@ -112,18 +112,47 @@ def select_point_groups(rows):
         groups[key].append(x)
     return dict(groups)
 
-def discover(root):
+def discover(root, progress=None):
+    """Read lightweight RASX headers; optionally report each discovery/validation step.
+
+    The callback receives immutable snapshots. It is intended for a background
+    worker and must not access Tk widgets. Frame image binaries are not loaded.
+    """
     root=pathlib.Path(root)
     if not root.is_dir():raise FileNotFoundError(root)
+    state=dict(stage='enumerate',found=0,total=None,checked=0,accepted=0,
+               rejected=0,current='',last_ok='',last_error='')
+    if progress:progress(state.copy())
+    files=[]
+    for p in root.rglob('*.rasx'):
+        files.append(p)
+        state.update(found=len(files),current=p.name)
+        if progress:progress(state.copy())
+    state.update(stage='sort',total=len(files),current='')
+    if progress:progress(state.copy())
+    files.sort()
+    state.update(stage='headers')
+    if progress:progress(state.copy())
     frames=[]
     failures=[]
-    for p in sorted(root.rglob('*.rasx')):
+    for i,p in enumerate(files,1):
+        state.update(current=p.name)
+        if progress:progress(state.copy())
         try:
             row=parse_rasx_header(p)
             row['path']=str(p)
             frames.append(row)
-        except Exception as e:failures.append(dict(file=str(p),error=str(e)))
-    return select_point_groups(frames),failures
+            state['last_ok']=p.name
+        except Exception as e:
+            failures.append(dict(file=str(p),error=str(e)))
+            state['last_error']=p.name
+        state.update(checked=i,accepted=len(frames),rejected=len(failures))
+        if progress:progress(state.copy())
+    state.update(stage='group',current='')
+    if progress:progress(state.copy())
+    groups=select_point_groups(frames)
+    if progress:progress(dict(state,stage='group_done',groups_total=len(groups)))
+    return groups,failures
 
 def validate_group(rows):
     bychi=collections.defaultdict(list)

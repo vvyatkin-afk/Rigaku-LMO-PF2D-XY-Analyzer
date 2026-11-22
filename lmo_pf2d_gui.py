@@ -18,12 +18,13 @@ import runpy
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import zipfile
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-VERSION="1.1.1"
+VERSION="1.1.2"
 TITLE="LMO PF2D Analyzer  |  HyPix-3000(H)"
 RASX_PATTERN=re.compile(
     r"^(?P<stem>.+)_image_(?P<seq>\d+)_(?P<chi>-?\d+(?:\.\d+)?)_(?P<num>\d+)\.rasx$",re.I)
@@ -32,13 +33,59 @@ def bundled(rel: str) -> pathlib.Path:
     root=pathlib.Path(getattr(sys, "_MEIPASS", pathlib.Path(__file__).resolve().parent))
     return root/rel
 
-def scan_groups(folder: str | pathlib.Path) -> list[dict]:
-    """Infer phi step, scan mode and image counts from actual RASX metadata."""
+def format_scan_progress(state: dict, elapsed_s: float) -> str:
+    """A readable, five-second heartbeat even if a single SMB read blocks."""
+    stage=state.get("stage","init")
+    seconds=int(max(0,elapsed_s))
+    found=state.get("found",0)
+    done=state.get("checked",0)
+    total=state.get("total")
+    accepted=state.get("accepted",0)
+    errors=state.get("rejected",0)
+    current=state.get("current","")
+    last_ok=state.get("last_ok","")
+    if stage=="init":
+        message="Подготовка анализатора и чтение каталога"
+    elif stage=="enumerate":
+        message=f"Поиск RASX: найдено {found} файлов"
+    elif stage=="sort":
+        message=f"Сортировка списка: {found} RASX"
+    elif stage=="headers":
+        message=(f"Чтение заголовков: {done}/{total} файлов; "
+                 f"прошли {accepted}; ошибки {errors}")
+    elif stage in ("group","group_done"):
+        message=f"Группировка XY-позиций: прочитано {accepted}, ошибки {errors}"
+    elif stage=="validate":
+        message=(f"Проверка серий: {state.get('groups_done',0)}/"
+                 f"{state.get('groups_total',0)}; "
+                 f"готово {state.get('groups_ok',0)}")
+    else:
+        message="Проверка RASX"
+    message+=f" | {seconds} с"
+    if stage=="headers" and current:
+        message+=" | сейчас: "+current[-90:]
+    if stage=="headers" and last_ok:
+        message+=" | последний ОК: "+last_ok[-90:]
+    return message
+
+def scan_groups(folder: str | pathlib.Path, progress=None) -> list[dict]:
+    """Infer scan mode and frame counts; optionally report progress snapshots."""
     lib=runpy.run_path(str(bundled("analysis/adaptive_pf2d.py")),run_name="_adaptive_")
-    groups,failures=lib["discover"](folder)
+    last_state={}
+    def report(state):
+        nonlocal last_state
+        last_state=state
+        if progress is not None:progress(state)
+    groups,failures=lib["discover"](folder,progress=report if progress else None)
     if not groups and failures:
         raise ValueError("No calibrated detector frames; first error: "+failures[0]["error"])
     rows=[]
+    completed=0
+    ready=0
+    total_groups=len(groups)
+    if progress is not None:
+        report(dict(last_state,stage="validate",current="",
+                    groups_done=0,groups_total=total_groups,groups_ok=0))
     for key,items in groups.items():
         try:
             bychi,info=lib["validate_group"](items)
@@ -56,6 +103,11 @@ def scan_groups(folder: str | pathlib.Path) -> list[dict]:
         rows.append(dict(key=str(key),frames=len(items),expected=expected,ready=ok,
                          chi38=sum(abs(v["chi"]-38)<.01 for v in items),
                          chi42=sum(abs(v["chi"]-42)<.01 for v in items),x_y=xy))
+        completed+=1
+        ready+=int(ok)
+        if progress is not None:
+            report(dict(last_state,stage="validate",current="",
+                        groups_done=completed,groups_total=total_groups,groups_ok=ready))
     return rows
 
 def run_script_mode(script: str, args: list[str]):
@@ -105,6 +157,10 @@ def make_gui():
             self.worker=None
             self.events=queue.Queue()
             self.report_dir=None
+            self.scan_active=False
+            self.scan_snapshot={"stage":"init"}
+            self.scan_started_at=0.0
+            self.scan_last_log=0.0
             self._create_ui(ttk,scrolledtext,tk)
             self.after(140,self._poll)
 
@@ -205,17 +261,44 @@ def make_gui():
             if chosen:self.output_parent.set(chosen)
 
         def _scan(self):
-            if self.worker is not None:return
+            if self.worker is not None or self.scan_active:return
             source=self.source.get().strip().strip('"')
             if not source:
                 messagebox.showwarning("Папка не задана","Укажите папку с RASX.")
                 return
-            self.info.set("Поиск и проверка серий RASX…")
+            self.rows=[]
+            self.scan_active=True
+            self.scan_snapshot={"stage":"init"}
+            self.scan_started_at=time.monotonic()
+            self.scan_last_log=self.scan_started_at
+            self.info.set("Начало проверки: поиск RASX и чтение метаданных…")
+            self.progress.set("Проверка RASX…")
             self.scan_button.configure(state="disabled")
+            self.start_button.configure(state="disabled")
+            self._log("ПРОВЕРКА НАЧАТА: исходные RASX только читаются; статус каждые 5 с.")
+            def on_progress(snapshot):
+                # Worker changes a plain immutable snapshot. Only the GUI thread touches Tk.
+                self.scan_snapshot=snapshot
             def scan_task():
-                try:self.events.put(("scan_ok",scan_groups(source)))
+                try:self.events.put(("scan_ok",scan_groups(source,progress=on_progress)))
                 except Exception as exc:self.events.put(("scan_error",str(exc)))
             threading.Thread(target=scan_task,daemon=True).start()
+
+        def _scan_heartbeat(self):
+            if not self.scan_active:return
+            now=time.monotonic()
+            if now-self.scan_last_log<5.0:return
+            self.scan_last_log=now
+            state=self.scan_snapshot
+            message=format_scan_progress(state,now-self.scan_started_at)
+            self.info.set(message)
+            self._log(message)
+            if state.get("stage")=="headers":
+                self.progress.set(f"RASX {state.get('checked',0)}/{state.get('total','?')}")
+            elif state.get("stage")=="validate":
+                self.progress.set(f"Точки {state.get('groups_done',0)}/{state.get('groups_total','?')}")
+            else:
+                self.progress.set("Проверка идёт…")
 
         def _display_scan(self,items):
             self.rows=items
@@ -230,7 +313,7 @@ def make_gui():
             self._log(self.info.get())
 
         def _start(self):
-            if self.worker is not None:return
+            if self.worker is not None or self.scan_active:return
             src=pathlib.Path(self.source.get().strip().strip('"'))
             parent=pathlib.Path(self.output_parent.get().strip().strip('"'))
             if not src.is_dir():
@@ -325,16 +408,23 @@ def make_gui():
                 try:kind,payload=self.events.get_nowait()
                 except queue.Empty:break
                 if kind=="scan_ok":
+                    self.scan_active=False
                     self.scan_button.configure(state="normal")
+                    self.start_button.configure(state="normal")
+                    self.progress.set("Проверка завершена")
                     self._display_scan(payload)
                 elif kind=="scan_error":
+                    self.scan_active=False
                     self.scan_button.configure(state="normal")
+                    self.start_button.configure(state="normal")
+                    self.progress.set("Ошибка проверки")
                     self.info.set("Ошибка проверки: "+payload)
-                    self._log(payload)
+                    self._log("Ошибка проверки: "+payload)
                 elif kind=="log":self._log(payload)
                 elif kind=="done":self._finish(payload)
                 elif kind=="worker_error":
                     self._log(payload);self._finish(1)
+            self._scan_heartbeat()
             self.after(140,self._poll)
 
         def _close(self):
