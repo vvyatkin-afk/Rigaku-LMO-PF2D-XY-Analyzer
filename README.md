@@ -90,6 +90,14 @@ Tested with a 360-frame, actual LMO (011) measurement. Peak centers in φ (deg) 
 
 `analysis/validated_single_point_scripts` – validated detector geometry and independent 2D/φ fits; invoked in isolated child processes to keep the GUI responsive.
 
+## GitHub storage policy (2026-11-23)
+
+Windows builds run only for a new `v*` release tag or manual dispatch,
+not automatically on each `main` update. GitHub Actions does **not** upload
+an EXE artifact or save a pip cache. The downloadable Windows EXE is attached
+to the latest GitHub Release, with old binary Releases removed when newer
+versions are published. Source files and scientific tests stay versioned.
+
 ## v1.2.0 – Detailed four-pole reports and cached-map report rebuild (2026-11-23)
 
 This version addresses batch results from Ivan's 39-point LMO (011) measurements.
