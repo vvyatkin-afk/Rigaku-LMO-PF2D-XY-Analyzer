@@ -4,9 +4,58 @@ Windows GUI for **Rigaku SmartLabXE / HyPix-3000(H)** 2D pole-figure datasets. P
 
 **No instrument control.** This program only reads RASX files and writes reports to a new folder. It cannot move the XY stage or operate the X-ray source.
 
+## v1.4.0 - Universal acquisition settings and sample reports (2026-11-23)
+
+The default **Analyze & Generate Reports** workflow now uses analysis/universal_pf2d.py.
+Older fixed LMO (011) processing is still available from the command line with --analyze-legacy.
+
+**Automatic scanning:** recursively reads RASX images from the selected folder AND its
+subfolders. Headers provide two-theta, omega, Phi and Chi positions, motor sweep
+start/stop, exposure (milliseconds), XY coordinates, detector dimensions and
+physical calibration. It does not assume two chi values, 2-degree Phi steps or
+four equally spaced poles. Compatible frames group by source folder, sample
+name, XY, acquisition suffix, reflection-specific 2theta and detector settings.
+Unsupported 1D scans and detector mountings are skipped with reasons in
+Rejected_Files.csv; files are never deleted, renamed or changed.
+
+**Scientific mapping:** known Rigaku SmartLabXE / HyPix-3000(H) horizontal
+orientation only. It uses the actual frame-specific 2theta for the signal
+ROI, adjacent background bands, and the measured detector-pixel geometry;
+integrates recorded continuous Phi windows; normalizes counts to the actual
+exposure time. Maps contain **only sampled directions**; unknown sectors are
+grey and are never interpolated or completed by crystallographic symmetry.
+Peaks are found from measured intensity rather than forced at 90-degree
+intervals. Observed FWHM values are not instrumental-resolution-corrected.
+
+**Limitations:** automatically reading arbitrary angles does not calibrate
+a physically different detector orientation. Those acquisitions fail
+explicitly. A single Chi band is not a full stereographic hemisphere,
+and instrument beta zero is NOT calibrated to tape longitudinal direction.
+Reflections (e.g. 222) are *filename hints*, not independently confirmed
+phase identifications. Tilt coordinates are not an independent measurement
+of tape-axis tilt. Compare with SmartLab-calibrated measurements before
+using unfamiliar setups for a quantitative acceptance criterion.
+
+**Results:** creates an independent timestamped folder outside the input
+tree, with sample_###_*/Pole_Figure_Report.pdf, map.npz,
+acquisition.json, chi_series.csv, peaks.json/peaks.csv, plus
+Overall_Pole_Figure_Report.pdf, Summary.csv, All_Peaks.csv,
+Rejected_Files.csv and inspection.json. Original inputs untouched.
+The re-report button reuses saved maps for v1.4 reports and auto-routes
+old v1.3 caches to the old formatter.
+
+CLI examples:
+
+~~~powershell
+LMO-PF2D-Analyzer-v1.4.0.exe --inspect --source "D:\Raw\Measurements"
+LMO-PF2D-Analyzer-v1.4.0.exe --analyze --source "D:\Raw\Measurements" --output "D:\PF2D\Run_NEW"
+LMO-PF2D-Analyzer-v1.4.0.exe --analyze --reports-only --source "D:\PF2D\Run_OLD" --output "D:\PF2D\New_PDF"
+LMO-PF2D-Analyzer-v1.4.0.exe --analyze-legacy --source "D:\LMO011" --output "D:\Legacy_NEW"
+~~~
+
 ## Download / Installation
 
-Download **LMO-PF2D-Analyzer.exe** from the repository's [Releases](../../releases). No separate Python installation is required. Windows 10/11 x64 supported by the build (built on Windows 11).
+Download **LMO-PF2D-Analyzer-v1.4.0.exe** from the repository's [Releases](../../releases). No separate Python installation is required. Windows 10/11 x64 supported by the build (built on Windows 11).
 
 1. Open the EXE.
 2. Select the folder containing Rigaku RASX frames; the program recursively finds matching files.
@@ -19,7 +68,7 @@ A successful single-point run creates `LMO011_point_report.pdf`, a measured ster
 
 ## Supported raw acquisition
 
-This initial release deliberately validates a **specific, real, verified acquisition geometry**, rather than silently misinterpreting arbitrary 2D XRD images:
+The historical v1.0 pipeline deliberately validated a **specific, real, verified acquisition geometry**, rather than silently misinterpreting arbitrary 2D XRD images:
 
 | Parameter | Required |
 |---|---|

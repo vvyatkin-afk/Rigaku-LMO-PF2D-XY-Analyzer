@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """LMO PF2D Analyzer - read-only Rigaku RASX pole-figure GUI for Windows.
-Build: pyinstaller --noconfirm --clean --onefile --console --hide-console hide-early --name LMO-PF2D-Analyzer-v1.3.0
+Build: pyinstaller --noconfirm --clean --onefile --console --hide-console hide-early --name LMO-PF2D-Analyzer-v1.4.0
        --add-data "analysis;analysis" lmo_pf2d_gui.py
 No Rigaku instrument control, X-ray generation, network/cloud mutations, or raw-file edits.
 """
@@ -24,8 +24,8 @@ import zipfile
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-VERSION="1.3.0"
-TITLE="LMO PF2D Analyzer  |  HyPix-3000(H)"
+VERSION="1.4.0"
+TITLE="Rigaku 2D Pole Figure Analyzer  |  HyPix-3000(H)"
 RASX_PATTERN=re.compile(
     r"^(?P<stem>.+)_image_(?P<seq>\d+)_(?P<chi>-?\d+(?:\.\d+)?)_(?P<num>\d+)\.rasx$",re.I)
 
@@ -34,48 +34,30 @@ def bundled(rel: str) -> pathlib.Path:
     return root/rel
 
 def choose_rasx_folder(folder: str | pathlib.Path, max_depth: int=3) -> pathlib.Path:
-    """Automatically select the single nested raw-RASX folder.
-
-    Only lists directory entries (no large image read). If multiple raw
-    folders are present, fail safely instead of processing the wrong batch.
-    """
+    """Resolve one nested scan folder; retain parent for multi-sample batches."""
     root=pathlib.Path(folder)
-    if not root.is_dir():
-        raise FileNotFoundError(f"Folder unavailable: {root}")
-    stack=[(root,0)]
+    if not root.is_dir():raise FileNotFoundError(f"Folder unavailable: {root}")
     candidates=[]
+    stack=[(root,0)]
     visited=0
     while stack:
         current,depth=stack.pop()
         visited+=1
-        if visited>150:
-            raise ValueError("Too many subfolders. Select a folder closer to the RASX data.")
-        children=[]
-        found=False
+        if visited>200:raise ValueError("Too many nested directories: select a nearer parent.")
         try:
-            with os.scandir(current) as items:
-                for entry in items:
-                    if entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(".rasx"):
-                        found=True
-                        break
-                    if depth<max_depth and entry.is_dir(follow_symlinks=False):
-                        name=entry.name.lower()
-                        if not (name.startswith(("lmo_pf2d_batch_","lmo_pf2d_reports_")) or
-                                name in ("__pycache__",".git")):
-                            children.append(pathlib.Path(entry.path))
+            entries=list(os.scandir(current))
         except PermissionError:
             if current==root:raise
             continue
-        if found:
+        if any(e.is_file(follow_symlinks=False) and e.name.lower().endswith(".rasx") for e in entries):
             candidates.append(current)
-        elif depth<max_depth:
-            stack.extend((child,depth+1) for child in sorted(children,reverse=True))
-    if not candidates:
-        raise ValueError(f"No .rasx files found within {max_depth} subfolder levels: {root}")
-    if len(candidates)>1:
-        names="; ".join(str(p) for p in sorted(candidates)[:4])
-        raise ValueError("Multiple RASX folders found. Select one exact measurement folder: "+names)
-    return candidates[0]
+        if depth<max_depth:
+            for e in entries:
+                if e.is_dir(follow_symlinks=False) and e.name.lower() not in ("__pycache__", ".git") and not e.name.lower().startswith(("lmo_pf2d_", "sample_")):
+                    stack.append((pathlib.Path(e.path),depth+1))
+    if not candidates:raise ValueError(f"No RASX files found in {root} (depth {max_depth}).")
+    if len(candidates)==1:return candidates[0]
+    return root
 
 
 def choose_existing_batch(folder: str | pathlib.Path, max_depth: int=2) -> pathlib.Path:
@@ -91,7 +73,7 @@ def choose_existing_batch(folder: str | pathlib.Path, max_depth: int=2) -> pathl
         visited+=1
         if visited>150:
             raise ValueError("Too many results subfolders. Select a specific LMO_PF2D_BATCH_... folder.")
-        if (current/"inspection.json").is_file() and any(current.glob("point_*/map.npz")):
+        if (current/"inspection.json").is_file() and (any(current.glob("point_*/map.npz")) or any(current.glob("sample_*/map.npz"))):
             candidates.append(current)
             continue
         if depth>=max_depth:continue
@@ -175,7 +157,7 @@ def scan_groups(folder: str | pathlib.Path, progress=None) -> list[dict]:
             bychi,info=lib["validate_group"](items)
             ok=True
             expected=sum(v.get("expected_unique_frames") or 0 for v in info.values())
-            mode=", ".join(f"{c}: {v['phi_step_deg']:.2f}° {v['mode']}"
+            mode=", ".join(f"{c}: {v['phi_step_deg']:.2f}Â° {v['mode']}"
                            for c,v in info.items())
         except Exception as e:
             ok=False
@@ -209,7 +191,13 @@ def run_script_mode(script: str, args: list[str]):
     runpy.run_path(str(target),run_name="__main__")
 
 def run_analyze_mode(args: list[str]):
-    target=bundled("analysis/adaptive_pf2d.py")
+    target=bundled("analysis/universal_pf2d.py")
+    if "--reports-only" in args and "--source" in args:
+        try:
+            ix=args.index("--source")+1
+            meta=json.loads((pathlib.Path(args[ix])/"inspection.json").read_text(encoding="utf-8"))
+            if meta.get("version")!="1.4.0":target=bundled("analysis/adaptive_pf2d.py")
+        except (OSError,ValueError,IndexError):pass
     if not target.is_file():
         raise FileNotFoundError("Bundled analyzer not found: "+str(target))
     sys.argv=[str(target),*args]
@@ -268,9 +256,9 @@ def make_gui():
             body.pack(fill="both",expand=True)
             header=ttk.Frame(body)
             header.pack(fill="x")
-            ttk.Label(header,text="LMO | 2D Pole Figure Analyzer",style="Header.TLabel").pack(side="left")
-            ttk.Label(header,text="v"+VERSION+" | HyPix-3000(H)",style="Small.TLabel").pack(side="left",padx=(14,0),pady=(7,0))
-            ttk.Label(body,text="One-pass workflow: check RASX metadata -> reconstruct 2D maps -> fit four peaks -> PDF + CSV. Raw files are read-only.",
+            ttk.Label(header,text="Rigaku | 2D Pole Figure Analyzer",style="Header.TLabel").pack(side="left")
+            ttk.Label(header,text="v"+VERSION+" | SmartLabXE / HyPix",style="Small.TLabel").pack(side="left",padx=(14,0),pady=(7,0))
+            ttk.Label(body,text="One pass: detect scan geometry / sample series -> reconstruct measured PF -> fit peaks -> individual + overall PDF/CSV. Raw files read-only.",
                       style="Text.TLabel").pack(anchor="w",pady=(5,17))
 
             srcrow=ttk.Frame(body)
@@ -293,7 +281,7 @@ def make_gui():
             ttk.Radiobutton(modes,text="All measured positions",variable=self.mode,value="batch").pack(side="left",padx=(3,18))
             ttk.Radiobutton(modes,text="One position #",variable=self.mode,value="single").pack(side="left",padx=(0,5))
             ttk.Entry(modes,textvariable=self.position,width=6).pack(side="left",padx=(0,16))
-            ttk.Label(modes,text="Position numbers come from the RASX acquisition suffix (1-39).",
+            ttk.Label(modes,text="Use automatic sample index shown below, or a unique numeric acquisition suffix.",
                       style="Small.TLabel").pack(side="left")
 
             actions=ttk.Frame(body)
@@ -308,14 +296,14 @@ def make_gui():
             ttk.Label(actions,textvariable=self.progress,style="Text.TLabel").pack(side="right",padx=6)
 
             ttk.Label(body,textvariable=self.info,style="Small.TLabel",wraplength=1050).pack(anchor="w",pady=(0,9))
-            ttk.Label(body,text="Measurement positions / live analysis status",style="Text.TLabel").pack(anchor="w",pady=(0,5))
+            ttk.Label(body,text="Samples / acquisitions / live analysis status",style="Text.TLabel").pack(anchor="w",pady=(0,5))
             frame=ttk.Frame(body)
             frame.pack(fill="both",expand=True)
-            cols=("position","frames","chi38","chi42","xy","status")
+            cols=("position","frames","chi_series","reflection","xy","status")
             self.tree=ttk.Treeview(frame,columns=cols,show="headings",height=10,selectmode="browse")
             for name,heading,width in [
-                ("position","Position",85),("frames","Frames",90),("chi38","Chi 38 deg",95),
-                ("chi42","Chi 42 deg",95),("xy","Stage X / Y (mm)",220),("status","Processing",180)]:
+                ("position","Group",70),("frames","Frames",80),("chi_series","Chi values (deg)",165),
+                ("reflection","hkl / 2theta",125),("xy","Stage X / Y (mm)",170),("status","Processing",200)]:
                 self.tree.heading(name,text=heading)
                 self.tree.column(name,width=width,minwidth=70,anchor="w" if name in ("xy","status") else "center")
             sy=ttk.Scrollbar(frame,orient="vertical",command=self.tree.yview)
@@ -468,7 +456,7 @@ def make_gui():
             point=int(point)
             row=self._point_row(point)
             for key,val in updates.items():
-                pos={"frames":1,"chi38":2,"chi42":3,"xy":4,"status":5}.get(key)
+                pos={"frames":1,"chi_series":2,"reflection":3,"xy":4,"status":5}.get(key)
                 if pos is not None:row[pos]=val
             self.tree.item(str(point),values=row)
             if self.tree.exists(str(point)):
@@ -495,8 +483,8 @@ def make_gui():
                          "Starting image reconstruction and peak fitting.")
             elif stage=="point_found":
                 point=p.get("point")
-                self._update_point(point,frames=p.get("frames",0),chi38=p.get("chi38",0),
-                                   chi42=p.get("chi42",0),
+                self._update_point(point,frames=p.get("frames",0),chi_series=p.get("chi_series",""),
+                                   reflection=f"{p.get('reflection','?')} / {p.get('two_theta',0):.2f} deg",
                                    xy=f"X={p.get('x')} / Y={p.get('y')}",status="Queued")
                 return
             elif stage in ("point_start","reconstruct","fit_and_report"):
@@ -558,7 +546,8 @@ def make_gui():
             target=self.report_dir
             if target is None or not target.exists():
                 messagebox.showinfo("No reports yet","Start an analysis first.");return
-            pdf=target/"LMO011_XY_Overall_Report.pdf"
+            pdf=target/"Overall_Pole_Figure_Report.pdf"
+            if not pdf.is_file():pdf=target/"LMO011_XY_Overall_Report.pdf"
             if pdf.is_file():target=pdf
             try:
                 if os.name=="nt":os.startfile(str(target))
@@ -622,6 +611,11 @@ def make_gui():
 def main():
     if len(sys.argv)>1:
         mode=sys.argv[1]
+        if mode=="--analyze-legacy":
+            target=bundled("analysis/adaptive_pf2d.py")
+            sys.argv=[str(target),*sys.argv[2:]]
+            runpy.run_path(str(target),run_name="__main__")
+            return
         if mode=="--script":
             if len(sys.argv)<3:raise SystemExit("--script expects a module filename")
             run_script_mode(sys.argv[2],sys.argv[3:]);return
@@ -631,7 +625,7 @@ def main():
             ap=argparse.ArgumentParser()
             ap.add_argument("--source",required=True)
             args=ap.parse_args(sys.argv[2:])
-            print(json.dumps(scan_groups(args.source),indent=2,ensure_ascii=False))
+            run_analyze_mode(["--inspect","--source",args.source])
             return
         if mode=="--smoke-gui":
             if len(sys.argv)!=3:raise SystemExit("Use --smoke-gui path-to-result.json")

@@ -27,7 +27,7 @@ class AdaptiveGUIWiring(unittest.TestCase):
         self.assertGreaterEqual(tuple(int(x) for x in gui.VERSION.split(".")),(1,3,0))
 
     def test_adaptive_dispatch(self):
-        self.assertIn("adaptive_pf2d.py",inspect.getsource(gui.run_analyze_mode))
+        self.assertIn("universal_pf2d.py",inspect.getsource(gui.run_analyze_mode))
 
     def test_metadata_check_is_not_required_before_analysis(self):
         source=inspect.getsource(gui.make_gui)
@@ -39,7 +39,7 @@ class AdaptiveGUIWiring(unittest.TestCase):
     def test_gui_strings_are_english(self):
         source=inspect.getsource(gui.make_gui)
         self.assertFalse(any(1024 <= ord(c) <= 1279 for c in source))
-        self.assertIn("One-pass workflow",source)
+        self.assertIn("One pass:",source)
 
 
 if __name__=="__main__":

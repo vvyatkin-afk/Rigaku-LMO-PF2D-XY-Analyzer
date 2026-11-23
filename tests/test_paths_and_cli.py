@@ -20,15 +20,14 @@ class FolderAndCliTests(unittest.TestCase):
             self.assertEqual(choose_rasx_folder(root),raw)
             self.assertEqual(choose_rasx_folder(raw),raw)
 
-    def test_refuse_multiple_raw_folders(self):
+    def test_multi_sample_parent_folder(self):
         with tempfile.TemporaryDirectory() as temp:
             root=pathlib.Path(temp)
             for name in ("run1","run2"):
                 d=root/name
                 d.mkdir()
                 (d/"frame.rasx").touch()
-            with self.assertRaisesRegex(ValueError,"Multiple"):
-                choose_rasx_folder(root)
+            self.assertEqual(choose_rasx_folder(root),root)
 
     def test_select_unique_previous_batch_subfolder(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -61,7 +60,7 @@ class FolderAndCliTests(unittest.TestCase):
         self.assertIn("--group-key",child.stdout)
 
     def test_version_bumped(self):
-        self.assertEqual(VERSION,"1.3.0")
+        self.assertEqual(VERSION,"1.4.0")
 
 
 if __name__=="__main__":
