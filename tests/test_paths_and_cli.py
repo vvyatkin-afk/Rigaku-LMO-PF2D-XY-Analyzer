@@ -27,7 +27,7 @@ class FolderAndCliTests(unittest.TestCase):
                 d=root/name
                 d.mkdir()
                 (d/"frame.rasx").touch()
-            with self.assertRaisesRegex(ValueError,"несколько"):
+            with self.assertRaisesRegex(ValueError,"Multiple"):
                 choose_rasx_folder(root)
 
     def test_select_unique_previous_batch_subfolder(self):
@@ -61,7 +61,7 @@ class FolderAndCliTests(unittest.TestCase):
         self.assertIn("--group-key",child.stdout)
 
     def test_version_bumped(self):
-        self.assertEqual(VERSION,"1.2.1")
+        self.assertEqual(VERSION,"1.3.0")
 
 
 if __name__=="__main__":

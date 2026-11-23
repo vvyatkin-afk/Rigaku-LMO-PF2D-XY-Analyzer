@@ -14,6 +14,7 @@ import runpy
 import shutil
 import re
 import sys
+import time
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -125,8 +126,12 @@ def discover(root, progress=None):
     state=dict(stage='enumerate',found=0,total=None,checked=0,accepted=0,
                rejected=0,current='',last_ok='',last_error='')
     if progress:progress(state.copy())
+    # When the selected folder itself has RASX files, use only that level:
+    # don't accidentally merge another batch from nested subdirectories.
+    direct=list(root.glob('*.rasx'))
+    candidates=direct if direct else root.rglob('*.rasx')
     files=[]
-    for p in root.rglob('*.rasx'):
+    for p in candidates:
         files.append(p)
         state.update(found=len(files),current=p.name)
         if progress:progress(state.copy())
@@ -213,9 +218,12 @@ def _image(p):
     if len(raw)!=775*385*4:raise ValueError(f"Unexpected image size: {p}")
     return np.frombuffer(raw,dtype='<u4').reshape(385,775)
 
-def reconstruct(rows,output):
+def reconstruct(rows,output,progress=None):
     bychi,info=validate_group(rows)
     sums=np.zeros((90,180),float); coverage=np.zeros_like(sums)
+    frames_done=0
+    last_emit=0.0
+    total_frames=sum(len(series) for series in bychi.values())
     # Stationary exposures are point samples. Continuous exposures cover true angular intervals.
     # We use an explicit quadrature over each frame's recorded angle range.
     for ch,series in sorted(bychi.items()):
@@ -250,6 +258,11 @@ def reconstruct(rows,output):
                 linear=t*180+b
                 sums+=np.bincount(linear,weights=pixels/len(phis),minlength=90*180).reshape(90,180)
                 coverage+=np.bincount(linear,weights=np.ones(len(linear))/len(phis),minlength=90*180).reshape(90,180)
+            frames_done+=1
+            now=time.monotonic()
+            if progress is not None and (frames_done==total_frames or now-last_emit>=5.):
+                progress(frames_done,total_frames,row.get('source_name',pathlib.Path(row['path']).name))
+                last_emit=now
     data=np.divide(sums,coverage,out=np.full_like(sums,np.nan),where=coverage>0)
     np.savez_compressed(output/'map.npz',intensity=data,coverage=coverage,
                         tilt=np.arange(90)+.5,azimuth=np.arange(180)*2+1)
@@ -323,39 +336,90 @@ def write_batch_summary(out,records):
     """Numeric IDs, four polar coordinates and widths, cone tilt and visual maps."""
     return rich_reports()["write_batch_report"](out,records)
 
-def run(source,output,inspect=False,group_key=None):
+def _progress(stage, **details):
+    """Machine-readable output for GUI; stdout is flushed for live updates."""
+    print("PROGRESS_JSON:"+json.dumps(dict(stage=stage,**details),ensure_ascii=False),flush=True)
+
+
+def run(source,output,inspect=False,group_key=None,position=None):
+    """Discover once, validate metadata, reconstruct images, fit peaks and report.
+
+    The GUI does not perform a separate metadata-discovery pass first.
+    """
     out=pathlib.Path(output)
     if out.exists():raise FileExistsError(f"Output must not exist: {out}")
-    groups,failures=discover(source)
+    last_emit=[0.0,None]
+    def on_discover(state):
+        now=time.monotonic()
+        stage=state.get('stage')
+        if stage!=last_emit[1] or now-last_emit[0]>=5.:
+            payload={k:v for k,v in state.items() if k!="stage"}
+            _progress("file_scan",scan_phase=stage,**payload)
+            last_emit[:]=[now,stage]
+    _progress("start",source=str(source))
+    groups,failures=discover(source,progress=on_discover)
     if not groups:raise ValueError("No supported RASX frames found")
     if group_key is not None:
         groups={k:v for k,v in groups.items() if str(k)==group_key}
         if not groups:raise ValueError(f"Selected series not found: {group_key}")
-    # Process from read-only inputs into brand-new directory only.
+    # Stable numeric order when multiple positions are in a single folder.
+    ordered=sorted(groups.items(),key=lambda kv:(
+        int(kv[0][3]) if kv[0][3] is not None else 10**8,
+        str(kv[0][0]),str(kv[0][1]),str(kv[0][2])))
+    if position is not None:
+        selected=[(i,key,rows) for i,(key,rows) in enumerate(ordered,1)
+                  if (int(key[3]) if key[3] is not None else i)==int(position)]
+        if len(selected)!=1:
+            raise ValueError(f"Expected one position #{position}, found {len(selected)}. Check acquisition numbering.")
+        jobs=selected
+    else:
+        jobs=[(i,key,rows) for i,(key,rows) in enumerate(ordered,1)]
+    _progress("metadata_done",groups=len(ordered),selected=len(jobs),
+              valid_files=sum(len(v) for v in groups.values()),errors=len(failures))
+    for i,key,rows in jobs:
+        _progress("point_found",point=i,position=(int(key[3]) if key[3] else i),
+                  frames=len(rows),chi38=sum(abs(v['chi']-38)<.01 for v in rows),
+                  chi42=sum(abs(v['chi']-42)<.01 for v in rows),
+                  x=key[2][0],y=key[2][1])
+    # Source RASX files remain read-only; only new results are written.
     out.mkdir(parents=True)
     records=[]
-    for i,(key,rows) in enumerate(groups.items(),1):
+    n_jobs=len(jobs)
+    for idx,(i,key,rows) in enumerate(jobs,1):
         item=dict(point=i,source_group=str(key),frames=len(rows),
-                  position_suffix=(int(key[3]) if key[3] is not None else None),x_mm=key[2][0],y_mm=key[2][1])
+                  position_suffix=(int(key[3]) if key[3] is not None else None),
+                  x_mm=key[2][0],y_mm=key[2][1])
+        _progress("point_start",point=i,index=idx,total=n_jobs,frames=len(rows),
+                  position=item["position_suffix"])
         try:
             series,info=validate_group(rows)
             item['acquisition']=info
             if not inspect:
                 dest=out/f'point_{i:03d}'
                 dest.mkdir()
-                data,cov,_=reconstruct(rows,dest)
+                _progress("reconstruct",point=i,index=idx,total=n_jobs,frames=len(rows))
+                data,cov,_=reconstruct(rows,dest,progress=lambda done,total,name: _progress(
+                    'frame_progress',point=i,index=idx,total=n_jobs,frames_done=done,
+                    frames_total=total,current_file=name))
+                _progress("fit_and_report",point=i,index=idx,total=n_jobs)
                 peaks=report(dest,rows,data,cov,info)
                 item['peaks']=peaks
             item['status']='OK'
-        except Exception as e:item.update(status='FAILED',reason=str(e))
+        except Exception as e:
+            item.update(status='FAILED',reason=str(e))
         records.append(item)
-    with (out/'inspection.json').open('w') as f:json.dump(dict(groups=records,rejected_files=failures),f,indent=2)
-    with (out/'inspection.csv').open('w',newline='') as f:
+        _progress("point_done",point=i,index=idx,total=n_jobs,status=item['status'],
+                  reason=item.get('reason',''))
+    _progress("summary",total=n_jobs)
+    with (out/'inspection.json').open('w',encoding='utf-8') as f:
+        json.dump(dict(groups=records,rejected_files=failures),f,indent=2)
+    with (out/'inspection.csv').open('w',newline='',encoding='utf-8-sig') as f:
         w=csv.DictWriter(f,fieldnames=['point','position_suffix','x_mm','y_mm','source_group','frames','status','reason'],extrasaction='ignore')
         w.writeheader();w.writerows(records)
     if not inspect:write_batch_summary(out,records)
-    for item in records:print(item['point'],item['status'],item.get('reason',''),item['frames'])
-    return 0 if all(q['status']=='OK' for q in records) else 2
+    failed=sum(q['status']!='OK' for q in records)
+    _progress("complete",total=n_jobs,successful=n_jobs-failed,failed=failed,output=str(out))
+    return 0 if failed==0 else 2
 
 def rebuild_reports_only(source,output):
     """Replot existing map.npz and acquisition.json WITHOUT opening raw RASX.
@@ -429,8 +493,9 @@ def main():
     p.add_argument('--inspect',action='store_true')
     p.add_argument('--reports-only',action='store_true',help='Rebuild PDF reports from saved map.npz; no raw RASX reads')
     p.add_argument('--group-key',default=None)
+    p.add_argument('--position',type=int,default=None,help='Optional numeric acquisition position (e.g. 37)')
     args=p.parse_args()
     if args.reports_only:raise SystemExit(rebuild_reports_only(args.source,args.output))
-    raise SystemExit(run(args.source,args.output,args.inspect,args.group_key))
+    raise SystemExit(run(args.source,args.output,args.inspect,args.group_key,args.position))
 
 if __name__=='__main__':main()

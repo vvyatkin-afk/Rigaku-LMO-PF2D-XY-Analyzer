@@ -90,6 +90,48 @@ Tested with a 360-frame, actual LMO (011) measurement. Peak centers in φ (deg) 
 
 `analysis/validated_single_point_scripts` – validated detector geometry and independent 2D/φ fits; invoked in isolated child processes to keep the GUI responsive.
 
+## v1.3.0 – One-click analysis, live point progress, English GUI (2026-11-23)
+
+All application controls, dialogs, progress messages, and logs are in English.
+For normal operation, **there is no separate metadata-check button**.
+
+**One-click processing:** choose a folder containing RASX files (or its
+unique parent), set the output parent, and press **Analyze & Generate Reports**.
+The program discovers the RASX files **once**, parses the acquisition metadata,
+validates each position's geometry, reconstructs the measured 2D pole figures,
+fits all four poles, and produces the individual and batch PDF/CSV outputs.
+The table of positions populates automatically from metadata during this
+same job. No prior **Check data** pass is needed.
+
+Progress is shown every few seconds: discovered and accepted frame counts,
+which position is being processed, reconstructed frame counts within each
+position, most recently reconstructed RASX filename, peak fit/report stage,
+completion status, and elapsed time. Long network reads do not freeze the UI.
+
+The actual image binary for each frame must still be read during
+reconstruction; acquisition metadata and image intensity are distinct data.
+The optimization removes the *extra preliminary metadata pass*, not the
+scientifically necessary reading and fitting operations.
+
+**One selected point** can now be requested directly by entering its numeric
+acquisition index (e.g., 37) without first scanning every point via a
+separate button. A metadata discovery is still performed inside the same
+job to determine the proper XY/chi grouping.
+
+**Fast report rebuild:** button **Rebuild PDFs from Saved Maps** uses the
+previously generated `inspection.json` and `point_XXX/map.npz` arrays.
+It refits/report-exports the existing reconstructed maps without reading
+the raw network RASX data again.
+
+**Disk safety:** all outputs are created in a new timestamped results
+directory; the user-specified output parent may not yet exist and will be
+created automatically. Old batch results and source RASX are never changed.
+
+The 2D color map, four-pole fits, observed width definitions, and
+conditional tilt model are unchanged from v1.2.1. This is a GUI/pipeline
+orchestration release with regression tests for one metadata discovery,
+English-language UI, and live worker events.
+
 ## v1.2.1 – RASX folder selection, output creation, reports-only CLI fix (2026-11-23)
 
 - **Critical bug fix**: the v1.2.0 command-line worker accessed

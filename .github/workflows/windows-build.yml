@@ -31,13 +31,20 @@ jobs:
           $exe = ".\\dist\\LMO-PF2D-Analyzer-${{ github.ref_name }}.exe"
           $proc = Start-Process -FilePath $exe -ArgumentList "--analyze","--help" -Wait -PassThru
           if ($proc.ExitCode -ne 0) { throw "Frozen EXE CLI smoke test failed: $($proc.ExitCode)" }
+          $smokePath = Join-Path $env:RUNNER_TEMP "pf2d-gui-smoke.json"
+          $guiProc = Start-Process -FilePath $exe -ArgumentList @("--smoke-gui", $smokePath) -Wait -PassThru
+          if ($guiProc.ExitCode -ne 0) { throw "Frozen GUI smoke test failed: $($guiProc.ExitCode)" }
+          $smoke = Get-Content -Raw $smokePath | ConvertFrom-Json
+          if ($smoke.status -ne "OK" -or $smoke.version -ne "${{ github.ref_name }}".TrimStart("v")) {
+            throw "GUI smoke check failed"
+          }
       - name: Publish versioned GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release create "${{ github.ref_name }}" "dist/LMO-PF2D-Analyzer-${{ github.ref_name }}.exe" --title "LMO PF2D Analyzer ${{ github.ref_name }}" --notes "Fix v1.2.0 CLI argparse failure. Auto-find unique nested RASX and prior batch result directories, create absent output folders, versioned Windows EXE filename. Includes full four-pole PDF reports; source data remain read-only." --latest
+          gh release create "${{ github.ref_name }}" "dist/LMO-PF2D-Analyzer-${{ github.ref_name }}.exe" --title "LMO PF2D Analyzer ${{ github.ref_name }}" --notes "v1.3.0: Fully English GUI. One-click Analyze & Generate Reports combines metadata inspection, 2D reconstruction, four-pole fits and rich PDF/CSV reporting without an extra initial scan. Live per-point and frame status, optional single numeric position, cached-map report rebuild. Raw RASX preserved." --latest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep only the newest versioned release
         if: startsWith(github.ref, 'refs/tags/v')
