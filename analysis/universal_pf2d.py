@@ -29,7 +29,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from scipy.ndimage import gaussian_filter, maximum_filter
 from scipy.optimize import least_squares
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 FRAME_RE = re.compile(
     r"^(?P<sample>.+)_image_(?P<seq>\d+)_(?P<chi>-?\d+(?:\.\d+)?)_(?P<frame>\d+)(?:_(?P<point>\d+))?$",
     re.IGNORECASE)
@@ -414,7 +414,7 @@ def render_map(ax,data,coverage,peaks=None,title=None, vmax=None):
     ax.set_theta_direction(-1)
     ax.set_ylim(0.,1.)
     ax.set_yticks(np.tan(np.radians(np.array([15,30,45,60,75,90])/2)))
-    ax.set_yticklabels(["15Â°","30Â°","45Â°","60Â°","75Â°","90Â°"],fontsize=7)
+    ax.set_yticklabels(["15 deg","30 deg","45 deg","60 deg","75 deg","90 deg"],fontsize=7)
     ax.tick_params(labelsize=8)
     if title:ax.set_title(title,pad=14,fontsize=11)
     for peak in peaks or []:
@@ -457,33 +457,34 @@ def write_point_pdf(dest, item, data, cov, peaks, acquisition):
     nvalid=int(np.count_nonzero(cov>0))
     ntot=int(cov.size)
     pct=100*nvalid/max(ntot,1)
-    cap = f"{sample} | 2theta={item['two_theta_deg']:.3f}Â° | {item['frames']} 2D frames"
+    cap = f"{sample} | 2theta={item['two_theta_deg']:.3f} deg | {item['frames']} 2D frames"
     finite=data[np.isfinite(data) & (cov>0)]
     vmax=float(np.percentile(finite,99.7)) if finite.size else 1.
     vmax=max(vmax, .0001)
     with PdfPages(report_file) as pdf:
         fig=plt.figure(figsize=(11.7,8.3),facecolor="white")
         _page_header(fig,"Measured 2D pole figure",cap)
-        ax=fig.add_axes([.08,.13,.52,.73],projection="polar")
+        ax=fig.add_axes([.06,.13,.47,.73],projection="polar")
         mesh=render_map(ax,data,cov,peaks,vmax=vmax)
-        cax=fig.add_axes([.60,.19,.016,.55])
-        fig.colorbar(mesh,cax=cax,label="net counts / pixel / second")
+        cax=fig.add_axes([.605,.22,.014,.48])
+        fig.colorbar(mesh,cax=cax,label="net count rate / pixel")
         info=[
-            f"Sample/group: {sample}",
-            f"Reflection label: {item['reflection_hint']} (filename only)",
+            f"Sample: {sample}",
+            f"hkl hint: {item['reflection_hint']} (filename only)",
             f"Detector: {item['detector']}",
-            f"2theta: {item['two_theta_deg']:.3f}Â°; omega: {item['omega_deg']:.3f}Â°",
-            f"Chi series: {', '.join(f'{v:g}Â°' for v in item['chi_angles_deg'])}",
+            f"2theta: {item['two_theta_deg']:.3f} deg",
+            f"omega: {item['omega_deg']:.3f} deg",
+            f"Chi: {', '.join(f'{v:g} deg' for v in item['chi_angles_deg'])}",
             f"Frames: {item['frames']}; peaks fitted: {len(peaks)}",
-            f"Measured map bins: {nvalid}/{ntot} ({pct:.1f}%)",
+            f"Map bins: {nvalid}/{ntot} ({pct:.1f}%)",
             f"Phi coverage: {item['phi_completeness']}",
             f"Status: {item['status']}",
             f"XY: X={item['x_mm']} mm, Y={item['y_mm']} mm",
             "",
-            "Unmeasured bins are grey and not inferred.",
-            "Rotation reference is instrument beta.",
+            "Grey: not measured (no interpolation).",
+            "Azimuth zero: instrument beta axis.",
         ]
-        fig.text(.65,.82,"\n".join(info),va="top",fontsize=9,linespacing=1.7)
+        fig.text(.69,.83,"\n".join(info),va="top",fontsize=8.6,linespacing=1.75)
         pdf.savefig(fig);plt.close(fig)
         fig=plt.figure(figsize=(11.7,8.3),facecolor="white")
         _page_header(fig,"Peak locations and widths",cap)
@@ -530,10 +531,10 @@ def write_point_pdf(dest, item, data, cov, peaks, acquisition):
                          "Yes" if meta["full_turn"] else "NO",
                          f"{meta['exposure_ms_min']:.0f}-{meta['exposure_ms_max']:.0f}"])
         tab=fig.add_axes([.06,.20,.90,.17])
-        _table(tab,["Chi (deg)","Frames","Phi step","Sweep","Mode","360Â°","Exposure (ms)"],rows,font=8)
+        _table(tab,["Chi (deg)","Frames","Phi step","Sweep","Mode","360 deg","Exposure (ms)"],rows,font=8)
         warn=acquisition["warnings"]
         fig.text(.07,.16,"QUALITY / GEOMETRY NOTES",fontsize=9,fontweight="bold",color="#425670")
-        message="\n".join("â€¢ "+x for x in warn[:6]) if warn else "â€¢ No acquisition gaps or metadata inconsistencies detected."
+        message="\n".join("- "+x for x in warn[:6]) if warn else "- No acquisition gaps or metadata inconsistencies detected."
         fig.text(.07,.14,message,va="top",fontsize=8,color="#72552a",linespacing=1.25)
         pdf.savefig(fig);plt.close(fig)
         # Local maps and radial/azimuthal cuts around each actual fitted maximum.
@@ -560,8 +561,8 @@ def write_point_pdf(dest, item, data, cov, peaks, acquisition):
                 ax.plot(0,tilt,"c+",markersize=10,mew=1.6)
                 ax.set_xlabel("Beta - peak center (deg)",fontsize=8)
                 ax.set_ylabel("Tilt (deg)",fontsize=8)
-                ax.set_title(f"Peak {p['rank']}: {beta:.1f}Â° / {tilt:.1f}Â° | "
-                             f"FWHM {p.get('phi_fwhm_observed_deg',float('nan')):.1f}Â°",fontsize=9)
+                ax.set_title(f"Peak {p['rank']}: {beta:.1f} deg / {tilt:.1f} deg | "
+                             f"FWHM {p.get('phi_fwhm_observed_deg',float('nan')):.1f} deg",fontsize=9)
             fig.tight_layout(rect=[.04,.06,.98,.87])
             pdf.savefig(fig);plt.close(fig)
     return str(report_file)
@@ -583,7 +584,7 @@ def write_overall_report(output,records):
         _page_header(fig,"Batch pole-figure report",f"Rigaku HyPix | Universal PF2D Analyzer v{VERSION}")
         counts=collections.Counter(r.get("status","UNKNOWN") for r in records)
         txt=(f"Total sample/acquisition groups: {len(records)}\n"
-             f"Complete: {counts.get('OK',0)}    Partial: {counts.get('PARTIAL',0)}"
+             f"Phi-complete processed: {counts.get('OK',0)}    Phi-partial: {counts.get('PARTIAL',0)}"
              f"    Failed: {counts.get('FAILED',0)}\n"
              "Different 2theta reflections and different detector geometries are NEVER combined.")
         fig.text(.07,.84,txt,fontsize=11,linespacing=1.9,color="#26425e",va="top")
@@ -592,7 +593,7 @@ def write_overall_report(output,records):
             r.get("reflection_hint",""),str(r.get("frames","")),
             "; ".join(f"{ch:g}" for ch in r.get("chi_angles_deg",[])),
             str(r.get("n_peaks",0)),r.get("status","")] for r in records[:20]]
-        _table(tab,["#","Sample/group","(hkl)*","2D frames","Chi settings (Â°)","Peaks","QC"],
+        _table(tab,["#","Sample/group","(hkl)*","2D frames","Chi settings (deg)","Peaks","QC"],
             table_rows,col_widths=[.04,.32,.08,.09,.23,.08,.12],font=8)
         fig.text(.06,.08,"* Reflection index is a filename hint, not a measured phase identification.",fontsize=9)
         if len(records)>20:
@@ -606,13 +607,13 @@ def write_overall_report(output,records):
             rows=[[str(r.get("point","")),str(r.get("sample",""))[:28],
                 f"{r.get('two_theta_deg',0):.2f}" if r.get("two_theta_deg") is not None else "-",
                 str(r.get("frames","")),str(r.get("n_peaks",0)),r.get("status","")] for r in records[start:start+28]]
-            _table(tab,["#","Sample/group","2theta (Â°)","Frames","Peaks","QC"],rows,
+            _table(tab,["#","Sample/group","2theta (deg)","Frames","Peaks","QC"],rows,
                    col_widths=[.06,.44,.13,.12,.10,.12],font=8)
             pdf.savefig(fig);plt.close(fig)
         # Representative measured maps with fixed scale per sample (not across different exposures).
         for start in range(0,len(ok),6):
             fig=plt.figure(figsize=(11.7,8.3),facecolor="white")
-            _page_header(fig,"Measured pole figures: comparison",f"Groups {start+1}â€“{min(start+6,len(ok))} of {len(ok)}")
+            _page_header(fig,"Measured pole figures: comparison",f"Groups {start+1}-{min(start+6,len(ok))} of {len(ok)}")
             for k,row in enumerate(ok[start:start+6]):
                 fp=output/row["folder"]/"map.npz"
                 try:
@@ -659,7 +660,7 @@ def write_overall_report(output,records):
             "The pixel-to-pole projection uses the supported HyPix horizontal SmartLabXE mounting convention.",
             "Other physical detector mountings are explicitly rejected until independently calibrated; numeric output is not guessed.",
         ]
-        fig.text(.08,.85,"\n\n".join("â€¢ "+x for x in notes),fontsize=11,color="#3f5063",va="top",linespacing=1.6)
+        fig.text(.08,.85,"\n\n".join("- "+x for x in notes),fontsize=11,color="#3f5063",va="top",linespacing=1.6)
         pdf.savefig(fig);plt.close(fig)
     return str(report)
 
@@ -787,7 +788,7 @@ def run(source,output,inspect=False,group_key=None,position=None):
 def rebuild(source,output):
     src=pathlib.Path(source)
     meta=json.loads((src/"inspection.json").read_text(encoding="utf-8"))
-    if meta.get("version")!=VERSION:
+    if meta.get("version") not in ("1.4.0", VERSION):
         raise ValueError("Saved maps have a different schema/version; use v1.3 reports-only for legacy maps")
     out=_safe_out(source,output)
     rows=[]

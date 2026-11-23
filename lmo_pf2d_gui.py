@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """LMO PF2D Analyzer - read-only Rigaku RASX pole-figure GUI for Windows.
-Build: pyinstaller --noconfirm --clean --onefile --console --hide-console hide-early --name LMO-PF2D-Analyzer-v1.4.0
+Build: pyinstaller --noconfirm --clean --onefile --console --hide-console hide-early --name LMO-PF2D-Analyzer-v1.4.1
        --add-data "analysis;analysis" lmo_pf2d_gui.py
 No Rigaku instrument control, X-ray generation, network/cloud mutations, or raw-file edits.
 """
@@ -24,7 +24,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-VERSION="1.4.0"
+VERSION="1.4.1"
 TITLE="Rigaku 2D Pole Figure Analyzer  |  HyPix-3000(H)"
 RASX_PATTERN=re.compile(
     r"^(?P<stem>.+)_image_(?P<seq>\d+)_(?P<chi>-?\d+(?:\.\d+)?)_(?P<num>\d+)\.rasx$",re.I)
@@ -196,7 +196,7 @@ def run_analyze_mode(args: list[str]):
         try:
             ix=args.index("--source")+1
             meta=json.loads((pathlib.Path(args[ix])/"inspection.json").read_text(encoding="utf-8"))
-            if meta.get("version")!="1.4.0":target=bundled("analysis/adaptive_pf2d.py")
+            if meta.get("version") not in ("1.4.0","1.4.1"):target=bundled("analysis/adaptive_pf2d.py")
         except (OSError,ValueError,IndexError):pass
     if not target.is_file():
         raise FileNotFoundError("Bundled analyzer not found: "+str(target))

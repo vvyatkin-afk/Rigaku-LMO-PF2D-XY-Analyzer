@@ -4,6 +4,17 @@ Windows GUI for **Rigaku SmartLabXE / HyPix-3000(H)** 2D pole-figure datasets. P
 
 **No instrument control.** This program only reads RASX files and writes reports to a new folder. It cannot move the XY stage or operate the X-ray source.
 
+## v1.4.1 - Visual report quality patch (2026-11-23)
+
+Supersedes v1.4.0 for new work. Scientific reconstruction unchanged.
+First-page map/colorbar/table geometry is revised to prevent overlap, and
+all report strings use portable ASCII angle units ("deg") to eliminate
+Windows character encoding artifacts. The peak resolution-quality guard
+and the multi-sample report pipeline are retained. Cached v1.4.0 maps
+can be regenerated into v1.4.1 PDFs without re-reading raw frames.
+The Windows executable and GitHub tag include v1.4.1 in their filenames.
+The GitHub build workflow retains the newest two versioned releases.
+
 ## v1.4.0 - Universal acquisition settings and sample reports (2026-11-23)
 
 The default **Analyze & Generate Reports** workflow now uses analysis/universal_pf2d.py.
@@ -55,7 +66,7 @@ LMO-PF2D-Analyzer-v1.4.0.exe --analyze-legacy --source "D:\LMO011" --output "D:\
 
 ## Download / Installation
 
-Download **LMO-PF2D-Analyzer-v1.4.0.exe** from the repository's [Releases](../../releases). No separate Python installation is required. Windows 10/11 x64 supported by the build (built on Windows 11).
+Download **LMO-PF2D-Analyzer-v1.4.1.exe** from the repository's [Releases](../../releases). No separate Python installation is required. Windows 10/11 x64 supported by the build (built on Windows 11).
 
 1. Open the EXE.
 2. Select the folder containing Rigaku RASX frames; the program recursively finds matching files.

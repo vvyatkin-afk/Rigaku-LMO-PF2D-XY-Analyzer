@@ -60,7 +60,7 @@ class FolderAndCliTests(unittest.TestCase):
         self.assertIn("--group-key",child.stdout)
 
     def test_version_bumped(self):
-        self.assertEqual(VERSION,"1.4.0")
+        self.assertEqual(VERSION,"1.4.1")
 
 
 if __name__=="__main__":

@@ -44,9 +44,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release create "${{ github.ref_name }}" "dist/LMO-PF2D-Analyzer-${{ github.ref_name }}.exe" --title "LMO PF2D Analyzer ${{ github.ref_name }}" --notes "v1.4.0: Auto-detect Rigaku HyPix 2D Phi acquisition angles, detector calibration, exposure and XY samples. Per-sample measured pole figures, data-driven peak fits, rich PDF/CSV and consolidated report. Recurse across folders; mark partial coverage and reject unsupported detector mountings. Raw RASX are never modified." --latest
+          gh release create "${{ github.ref_name }}" "dist/LMO-PF2D-Analyzer-${{ github.ref_name }}.exe" --title "LMO PF2D Analyzer ${{ github.ref_name }}" --notes "v1.4.1: Auto-detect Rigaku HyPix 2D Phi acquisition angles, detector calibration, exposure and XY samples. Per-sample measured pole figures, data-driven peak fits, rich PDF/CSV and consolidated report. Recurse across folders; mark partial coverage and reject unsupported detector mountings. Raw RASX are never modified." --latest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Keep only the newest versioned release
+      - name: Keep newest two versioned releases
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
@@ -56,9 +56,11 @@ jobs:
           if ($current -notmatch '^v\d+\.\d+\.\d+$') { throw "Invalid version tag" }
           $currentVersion = [version]($current.Substring(1))
           $previous = gh release list --limit 100 --json tagName --jq '.[].tagName'
+          $sortedVersions = @($previous | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' } | Sort-Object { [version]($_.Substring(1)) } -Descending)
+          $keep = @($sortedVersions | Select-Object -First 2)
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           foreach ($tag in $previous) {
-            if ($tag -and $tag -match '^v\d+\.\d+\.\d+$' -and [version]($tag.Substring(1)) -lt $currentVersion) {
+            if ($tag -and $tag -match '^v\d+\.\d+\.\d+$' -and ($tag -notin $keep) -and [version]($tag.Substring(1)) -lt $currentVersion) {
               gh release delete $tag --yes --cleanup-tag
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
