@@ -3,6 +3,8 @@ import csv
 import hashlib
 import json
 import math
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -91,8 +93,12 @@ class RichReportTests(unittest.TestCase):
             (original/"inspection.json").write_text(json.dumps(metadata),encoding="utf-8")
             before=hashlib.sha256((source/"map.npz").read_bytes()).hexdigest()
             target=root/"improved_reports"
-            rc=rebuild_reports_only(original,target)
-            self.assertEqual(rc,0)
+            app=Path(__file__).resolve().parents[1]/"lmo_pf2d_gui.py"
+            result=subprocess.run([sys.executable,str(app),"--analyze","--reports-only",
+                                   "--source",str(original),"--output",str(target)],
+                                  capture_output=True,text=True,errors="replace",timeout=120)
+            self.assertEqual(result.returncode,0,result.stdout+"\n"+result.stderr)
+            self.assertIn("REPORTS_READY",result.stdout)
             after=hashlib.sha256((source/"map.npz").read_bytes()).hexdigest()
             self.assertEqual(before,after,"Cached source map was modified")
             point=target/"point_001"

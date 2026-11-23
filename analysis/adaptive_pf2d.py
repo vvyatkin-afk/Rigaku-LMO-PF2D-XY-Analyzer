@@ -427,6 +427,7 @@ def main():
     p.add_argument('--source',required=True)
     p.add_argument('--output',required=True)
     p.add_argument('--inspect',action='store_true')
+    p.add_argument('--reports-only',action='store_true',help='Rebuild PDF reports from saved map.npz; no raw RASX reads')
     p.add_argument('--group-key',default=None)
     args=p.parse_args()
     if args.reports_only:raise SystemExit(rebuild_reports_only(args.source,args.output))

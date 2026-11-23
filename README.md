@@ -90,6 +90,46 @@ Tested with a 360-frame, actual LMO (011) measurement. Peak centers in φ (deg) 
 
 `analysis/validated_single_point_scripts` – validated detector geometry and independent 2D/φ fits; invoked in isolated child processes to keep the GUI responsive.
 
+## v1.2.1 – RASX folder selection, output creation, reports-only CLI fix (2026-11-23)
+
+- **Critical bug fix**: the v1.2.0 command-line worker accessed
+  `args.reports_only` without registering the flag in `argparse`.
+  That caused `AttributeError: Namespace has no attribute reports_only`
+  in **both** normal and cached-map report generation, before any input
+  could be processed. The option now exists and has integration tests that
+  run the actual command-line dispatcher to produce four-page PDF reports.
+- **Input folder auto-selection**: Choose a parent folder (up to 3 nested
+  levels) containing a single directory with RASX files. The GUI resolves
+  this to the exact RASX-containing folder and displays the selected path.
+  If multiple subfolders contain different RASX scans, the program
+  refuses to guess and requests a more specific folder.
+- **Cached reports folder auto-selection**: Button
+  `Новые PDF из готового расчёта` searches up to 2 nested levels for
+  a unique prior `inspection.json` and saved `point_XXX/map.npz`.
+  No RASX read/reconstruction is necessary; prior folders are preserved.
+- **Nonexistent output folder accepted**: You may type a new output parent
+  path manually; the GUI creates it recursively and adds a separately
+  timestamped `LMO_PF2D_BATCH_...` or `LMO_PF2D_REPORTS_...` child.
+  If the path cannot be created, it displays the actual permission or
+  filesystem error, rather than failing silently.
+- **Version in EXE filename**: `LMO-PF2D-Analyzer-v1.2.1.exe`
+  and in the main window. CI also smoke-tests the built EXE
+  with `--analyze --help` before publishing it.
+
+### Processing existing 39-point data without rereading RASX
+
+1. Run the **v1.2.1 EXE**.
+2. Set the output parent (it need not exist; it will be created).
+3. Click **Новые PDF из готового расчёта**.
+4. Select the already calculated
+   `LMO_PF2D_BATCH_20261123_034719` folder, or its parent if it contains
+   exactly one saved batch directory.
+5. Review the new `LMO_PF2D_REPORTS_...` directory, point PDFs,
+   `XY_summary.csv`, and the comprehensive batch PDF.
+
+This version keeps the same 2D reconstruction and color palette as v1.2.0.
+It does not overwrite raw RASX files or earlier results.
+
 ## GitHub storage policy (2026-11-23)
 
 Windows builds run only for a new `v*` release tag or manual dispatch,

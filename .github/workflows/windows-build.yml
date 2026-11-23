@@ -18,19 +18,26 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
-      - name: Build onefile executable
+      - name: Build version-named onefile executable
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onefile --console --hide-console hide-early --name LMO-PF2D-Analyzer --add-data "analysis;analysis" --hidden-import scipy.optimize --hidden-import scipy.special --hidden-import matplotlib.pyplot --hidden-import matplotlib.patches --hidden-import matplotlib.backends.backend_pdf --hidden-import numpy --hidden-import pypdf --hidden-import PIL lmo_pf2d_gui.py
+          $appName = "LMO-PF2D-Analyzer-${{ github.ref_name }}"
+          python -m PyInstaller --noconfirm --clean --onefile --console --hide-console hide-early --name $appName --add-data "analysis;analysis" --hidden-import scipy.optimize --hidden-import scipy.special --hidden-import matplotlib.pyplot --hidden-import matplotlib.patches --hidden-import matplotlib.backends.backend_pdf --hidden-import numpy --hidden-import pypdf --hidden-import PIL lmo_pf2d_gui.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Get-FileHash dist/LMO-PF2D-Analyzer.exe -Algorithm SHA256 | Format-List
+          Get-FileHash ("dist/" + $appName + ".exe") -Algorithm SHA256 | Format-List
+      - name: Smoke-test frozen Windows executable
+        shell: pwsh
+        run: |
+          $exe = ".\\dist\\LMO-PF2D-Analyzer-${{ github.ref_name }}.exe"
+          $proc = Start-Process -FilePath $exe -ArgumentList "--analyze","--help" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "Frozen EXE CLI smoke test failed: $($proc.ExitCode)" }
       - name: Publish versioned GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release create "${{ github.ref_name }}" dist/LMO-PF2D-Analyzer.exe --title "LMO PF2D Analyzer ${{ github.ref_name }}" --notes "Rich four-pole PDF reports, numeric XY positions, measured/model curves and fast report rebuild from saved maps (no rereading RASX). Offline instrument flows remain unvalidated." --latest
+          gh release create "${{ github.ref_name }}" "dist/LMO-PF2D-Analyzer-${{ github.ref_name }}.exe" --title "LMO PF2D Analyzer ${{ github.ref_name }}" --notes "Fix v1.2.0 CLI argparse failure. Auto-find unique nested RASX and prior batch result directories, create absent output folders, versioned Windows EXE filename. Includes full four-pole PDF reports; source data remain read-only." --latest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep only the newest versioned release
         if: startsWith(github.ref, 'refs/tags/v')

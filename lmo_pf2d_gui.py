@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """LMO PF2D Analyzer - read-only Rigaku RASX pole-figure GUI for Windows.
-Build: pyinstaller --noconfirm --clean --onefile --windowed --name LMO-PF2D-Analyzer
+Build: pyinstaller --noconfirm --clean --onefile --console --hide-console hide-early --name LMO-PF2D-Analyzer-v1.2.1
        --add-data "analysis;analysis" lmo_pf2d_gui.py
 No Rigaku instrument control, X-ray generation, network/cloud mutations, or raw-file edits.
 """
@@ -24,7 +24,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-VERSION="1.2.0"
+VERSION="1.2.1"
 TITLE="LMO PF2D Analyzer  |  HyPix-3000(H)"
 RASX_PATTERN=re.compile(
     r"^(?P<stem>.+)_image_(?P<seq>\d+)_(?P<chi>-?\d+(?:\.\d+)?)_(?P<num>\d+)\.rasx$",re.I)
@@ -32,6 +32,94 @@ RASX_PATTERN=re.compile(
 def bundled(rel: str) -> pathlib.Path:
     root=pathlib.Path(getattr(sys, "_MEIPASS", pathlib.Path(__file__).resolve().parent))
     return root/rel
+
+def choose_rasx_folder(folder: str | pathlib.Path, max_depth: int=3) -> pathlib.Path:
+    """Automatically select the single nested raw-RASX folder.
+
+    Only lists directory entries (no large image read). If multiple raw
+    folders are present, fail safely instead of processing the wrong batch.
+    """
+    root=pathlib.Path(folder)
+    if not root.is_dir():
+        raise FileNotFoundError(f"Папка недоступна: {root}")
+    stack=[(root,0)]
+    candidates=[]
+    visited=0
+    while stack:
+        current,depth=stack.pop()
+        visited+=1
+        if visited>150:
+            raise ValueError("Слишком много подпапок. Выберите папку измерения ближе к файлам RASX.")
+        children=[]
+        found=False
+        try:
+            with os.scandir(current) as items:
+                for entry in items:
+                    if entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(".rasx"):
+                        found=True
+                        break
+                    if depth<max_depth and entry.is_dir(follow_symlinks=False):
+                        name=entry.name.lower()
+                        if not (name.startswith(("lmo_pf2d_batch_","lmo_pf2d_reports_")) or
+                                name in ("__pycache__",".git")):
+                            children.append(pathlib.Path(entry.path))
+        except PermissionError:
+            if current==root:raise
+            continue
+        if found:
+            candidates.append(current)
+        elif depth<max_depth:
+            stack.extend((child,depth+1) for child in sorted(children,reverse=True))
+    if not candidates:
+        raise ValueError(f"Не найдены файлы .rasx в папке и подпапках (до {max_depth} уровней): {root}")
+    if len(candidates)>1:
+        names="; ".join(str(p) for p in sorted(candidates)[:4])
+        raise ValueError("Найдено несколько папок с RASX. Выберите одну конкретную: "+names)
+    return candidates[0]
+
+
+def choose_existing_batch(folder: str | pathlib.Path, max_depth: int=2) -> pathlib.Path:
+    """Select a unique prior result directory containing inspection.json and saved maps."""
+    root=pathlib.Path(folder)
+    if not root.is_dir():
+        raise FileNotFoundError(f"Папка недоступна: {root}")
+    stack=[(root,0)]
+    candidates=[]
+    visited=0
+    while stack:
+        current,depth=stack.pop()
+        visited+=1
+        if visited>150:
+            raise ValueError("Слишком много подпапок с результатами. Выберите каталог LMO_PF2D_BATCH_...")
+        if (current/"inspection.json").is_file() and any(current.glob("point_*/map.npz")):
+            candidates.append(current)
+            continue
+        if depth>=max_depth:continue
+        try:
+            children=[pathlib.Path(e.path) for e in os.scandir(current)
+                      if e.is_dir(follow_symlinks=False)
+                      and e.name.lower() not in ("__pycache__", ".git")]
+        except PermissionError:
+            if current==root:raise
+            continue
+        stack.extend((child,depth+1) for child in sorted(children,reverse=True))
+    if not candidates:
+        raise ValueError("Не найден сохранённый расчёт с inspection.json и point_*/map.npz.")
+    if len(candidates)>1:
+        raise ValueError("Найдено несколько готовых расчётов. Выберите нужную папку LMO_PF2D_BATCH_...")
+    return candidates[0]
+
+
+def ensure_output_parent(folder: str | pathlib.Path) -> pathlib.Path:
+    """Create the chosen report parent, including absent intermediate folders."""
+    raw=str(folder).strip().strip('"')
+    if not raw:
+        raise ValueError("Укажите папку для отчётов.")
+    target=pathlib.Path(raw)
+    target.mkdir(parents=True,exist_ok=True)
+    if not target.is_dir():
+        raise NotADirectoryError(f"Путь для отчётов не является папкой: {target}")
+    return target
 
 def format_scan_progress(state: dict, elapsed_s: float) -> str:
     """A readable, five-second heartbeat even if a single SMB read blocks."""
@@ -158,6 +246,7 @@ def make_gui():
             self.events=queue.Queue()
             self.report_dir=None
             self.scan_active=False
+            self.scanned_source=None
             self.scan_snapshot={"stage":"init"}
             self.scan_started_at=0.0
             self.scan_last_log=0.0
@@ -201,7 +290,7 @@ def make_gui():
             ttk.Label(output_row,text="Папка для отчётов",width=17).pack(side="left")
             ttk.Entry(output_row,textvariable=self.output_parent).pack(side="left",fill="x",expand=True,padx=(4,8))
             ttk.Button(output_row,text="Обзор…",command=self._browse_output).pack(side="left")
-            ttk.Label(root,text="При запуске создаётся НОВАЯ подпапка с датой и временем. Готовые отчёты не перезаписываются.",
+            ttk.Label(root,text="Путь для отчётов можно ввести вручную, даже если папки ещё нет: программа создаст её и новую датированную подпапку.",
                       style="Small.TLabel").pack(anchor="w",pady=(1,12))
             mode_row=ttk.Frame(root)
             mode_row.pack(fill="x",pady=(0,9))
@@ -269,6 +358,7 @@ def make_gui():
                 messagebox.showwarning("Папка не задана","Укажите папку с RASX.")
                 return
             self.rows=[]
+            self.scanned_source=None
             self.scan_active=True
             self.scan_snapshot={"stage":"init"}
             self.scan_started_at=time.monotonic()
@@ -283,7 +373,10 @@ def make_gui():
                 # Worker changes a plain immutable snapshot. Only the GUI thread touches Tk.
                 self.scan_snapshot=snapshot
             def scan_task():
-                try:self.events.put(("scan_ok",scan_groups(source,progress=on_progress)))
+                try:
+                    actual=choose_rasx_folder(source)
+                    self.events.put(("scan_resolved",str(actual)))
+                    self.events.put(("scan_ok",scan_groups(actual,progress=on_progress)))
                 except Exception as exc:self.events.put(("scan_error",str(exc)))
             threading.Thread(target=scan_task,daemon=True).start()
 
@@ -318,13 +411,13 @@ def make_gui():
         def _start(self):
             if self.worker is not None or self.scan_active:return
             src=pathlib.Path(self.source.get().strip().strip('"'))
-            parent=pathlib.Path(self.output_parent.get().strip().strip('"'))
+            parent=self.output_parent.get().strip().strip('"')
             if not src.is_dir():
                 messagebox.showerror("Ошибка","Папка с RASX недоступна.");return
-            if not parent.is_dir():
-                messagebox.showerror("Ошибка","Папка отчётов должна существовать.");return
             if not self.rows:
                 messagebox.showwarning("Нет серий","Сначала нажмите «Проверить данные».");return
+            if self.scanned_source!=str(src):
+                messagebox.showwarning("Проверьте данные","После смены папки необходимо повторно нажать «Проверить данные».");return
             args=["--source",str(src)]
             kind=self.mode.get()
             if kind=="single":
@@ -339,6 +432,10 @@ def make_gui():
                 if not messagebox.askyesno("Неполные серии",
                         "Часть серий содержит неполное число кадров. Отчёт отобразит их как FAILED. Продолжить?"):
                     return
+            try:
+                parent=ensure_output_parent(parent)
+            except (OSError,ValueError) as exc:
+                messagebox.showerror("Невозможно создать папку отчётов",str(exc));return
             stamp=dt.datetime.now().strftime("%Y%m%d_%H%M%S")
             dest=parent/f"LMO_PF2D_{'ONE' if kind=='single' else 'BATCH'}_{stamp}"
             n=1
@@ -356,12 +453,14 @@ def make_gui():
             source=filedialog.askdirectory(title="Выберите готовую папку LMO_PF2D_BATCH_...",
                                              initialdir=self.source.get() or str(pathlib.Path.home()))
             if not source:return
-            if not (pathlib.Path(source)/"inspection.json").is_file():
-                messagebox.showerror("Нет готовых данных","В этой папке не найден inspection.json.\nВыберите каталог LMO_PF2D_BATCH_... с папками point_001 и map.npz.")
-                return
-            parent=pathlib.Path(self.output_parent.get().strip().strip('"'))
-            if not parent.is_dir():
-                messagebox.showerror("Ошибка","Укажите существующую папку для новых PDF.");return
+            try:
+                source=choose_existing_batch(source)
+            except (OSError,ValueError) as exc:
+                messagebox.showerror("Нет готовых данных",str(exc));return
+            try:
+                parent=ensure_output_parent(self.output_parent.get())
+            except (OSError,ValueError) as exc:
+                messagebox.showerror("Невозможно создать папку отчётов",str(exc));return
             stamp=dt.datetime.now().strftime("%Y%m%d_%H%M%S")
             dest=parent/f"LMO_PF2D_REPORTS_{stamp}"
             idx=1
@@ -438,7 +537,11 @@ def make_gui():
             for _ in range(80):
                 try:kind,payload=self.events.get_nowait()
                 except queue.Empty:break
-                if kind=="scan_ok":
+                if kind=="scan_resolved":
+                    self.source.set(payload)
+                    self.scanned_source=payload
+                    self._log("Папка измерений: "+payload)
+                elif kind=="scan_ok":
                     self.scan_active=False
                     self.scan_button.configure(state="normal")
                     self.start_button.configure(state="normal")
