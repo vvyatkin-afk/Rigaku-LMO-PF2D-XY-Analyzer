@@ -28,8 +28,10 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from scipy.ndimage import gaussian_filter, maximum_filter
 from scipy.optimize import least_squares
+from analysis import lattice_strain as lattice
+from analysis import lattice_reports as lattice_report
 
-VERSION = "1.4.1"
+VERSION = "1.5.1"
 FRAME_RE = re.compile(
     r"^(?P<sample>.+)_image_(?P<seq>\d+)_(?P<chi>-?\d+(?:\.\d+)?)_(?P<frame>\d+)(?:_(?P<point>\d+))?$",
     re.IGNORECASE)
@@ -38,6 +40,105 @@ NOTE = ("Measured instrument-coordinate pole figure; uncovered sectors are not i
         "Widths include instrumental and sampling broadening; azimuth zero is not "
         "calibrated to tape length.")
 SIG = lambda x: round(float(x), 4)
+# Nominal pseudocubic LMO reference only, not a phase identification.
+LMO_A = 3.880
+CU_KA = 1.5406
+LMO_REF = {}
+for _hkl in ("011", "111", "222"):
+    _h, _k, _l = map(int, _hkl)
+    _norm = math.sqrt(_h*_h + _k*_k + _l*_l)
+    LMO_REF[_hkl] = (math.degrees(2*math.asin(CU_KA*_norm/(2*LMO_A))),
+                      math.degrees(math.acos(_l/_norm)))
+
+def reflection_hint(sample):
+    """Explicit known PF labels or standalone Miller indices, not sample numbers."""
+    return lattice.hint_from_name(sample)
+
+def reflection_context(row,config=None):
+    tt = float(row["two_theta"])
+    hint = row.get("reflection_hint", "not specified")
+    if config is not None:
+        hint_hkl=lattice.hkl_parse(hint)
+        d=lattice.reference_d(hint_hkl,config)
+        if d is not None and config["wavelength_A"]<2*d:
+            g=np.linalg.solve(lattice.basis(config["cell_A_deg"]).T,np.asarray(hint_hkl,float))
+            ref=math.degrees(2*math.asin(config["wavelength_A"]/(2*d)))
+            psi=math.degrees(math.acos(float(np.clip(abs(g[2])/np.linalg.norm(g),0,1))))
+            return dict(hkl_hint=hint,lmo_angle_candidate="not evaluated",nominal_lmo_hkl=hint,
+                        nominal_2theta_deg=ref,nominal_pole_deg=psi,two_theta_offset_deg=tt-ref,
+                        label_basis="filename hint; configured reference only")
+        if not config["material"].startswith("LMO"):
+            return dict(hkl_hint=hint,lmo_angle_candidate="not evaluated",nominal_lmo_hkl="unassigned",
+                        nominal_2theta_deg=None,nominal_pole_deg=None,two_theta_offset_deg=None,label_basis="unassigned")
+    nearest = min(LMO_REF, key=lambda h: abs(LMO_REF[h][0]-tt))
+    candidate = nearest if abs(tt-LMO_REF[nearest][0]) <= 1.2 else "unassigned"
+    hkl = hint if hint in LMO_REF else candidate
+    result = dict(hkl_hint=hint, lmo_angle_candidate=candidate, nominal_lmo_hkl=hkl,
+                  nominal_2theta_deg=None, nominal_pole_deg=None,
+                  two_theta_offset_deg=None, label_basis="unassigned")
+    explicit = lattice.hkl_parse(hint)
+    if explicit and hint not in LMO_REF:
+        norm = math.sqrt(sum(x*x for x in explicit))
+        ratio = CU_KA*norm/(2*LMO_A)
+        if ratio < 1:
+            hkl = hint
+            ref = math.degrees(2*math.asin(ratio))
+            psi = math.degrees(math.acos(abs(explicit[2])/norm))
+            result.update(nominal_lmo_hkl=hkl,nominal_2theta_deg=ref,nominal_pole_deg=psi,
+                          two_theta_offset_deg=tt-ref,label_basis="filename hint; nominal cubic LMO only")
+            return result
+    if hkl in LMO_REF:
+        ref, psi = LMO_REF[hkl]
+        result.update(nominal_2theta_deg=ref, nominal_pole_deg=psi,
+                      two_theta_offset_deg=tt-ref,
+                      label_basis="filename hint" if hint in LMO_REF else "angle candidate only")
+    return result
+
+def reflection_notes(row,config=None):
+    info = reflection_context(row,config)
+    warnings = []
+    if info["nominal_2theta_deg"] is not None:
+        delta = info["two_theta_offset_deg"]
+        if abs(delta)>1.2:
+            warnings.append(f"Reflection {info['nominal_lmo_hkl']} differs from reference 2theta by {delta:+.2f} deg; verify phase and radial ROI.")
+        elif info["label_basis"]=="angle candidate only":
+            warnings.append(f"LMO({info['nominal_lmo_hkl']}) is an angle-based candidate only; confirm sample phase.")
+    return info, warnings
+
+def coverage_check(coverage, peaks, reference):
+    """Do not confuse a complete Phi rotation with complete radial coverage."""
+    valid = coverage > 0
+    t = np.arange(valid.shape[0]) + .5
+    az = (np.arange(valid.shape[1])+.5)*360./valid.shape[1]
+    radial = t[valid.any(axis=1)]
+    psi = reference.get("nominal_pole_deg")
+    nominal_fraction = None
+    if psi is not None:
+        index = int(np.clip(math.floor(psi), 0, len(t)-1))
+        nominal_fraction = float(valid[index].mean())
+    for p in peaks:
+        if p.get("status") not in ("OK","FIT_WARNING"):
+            continue
+        if not all(k in p for k in ("phi_fwhm_observed_deg","tilt_fwhm_observed_deg")):
+            continue
+        beta_distance = np.abs((az-p["beta_deg"]+180.)%360.-180.)
+        tilt_distance = np.abs(t-p["tilt_deg"])
+        # Coverage of the central fitted FWHM box, not extrapolated tails.
+        # Explicitly flag detector/phi gaps without altering the fitted widths.
+        mask = ((tilt_distance[:,None] <= p["tilt_fwhm_observed_deg"]/2.) &
+                (beta_distance[None,:] <= p["phi_fwhm_observed_deg"]/2.))
+        fraction = float(valid[mask].mean()) if mask.any() else 0.
+        p["fwhm_box_coverage_fraction"] = fraction
+        p["coverage_qc"] = "OK" if fraction >= .98 else "CLIPPED_OR_GAPPED"
+        p["reflection_hint"] = reference.get("hkl_hint")
+        if psi is not None:
+            p["nominal_pole_deg"] = psi
+            p["pole_center_offset_deg"] = p["tilt_deg"]-psi
+    return dict(measured_tilt_min_deg=float(radial[0]) if len(radial) else None,
+                measured_tilt_max_deg=float(radial[-1]) if len(radial) else None,
+                nominal_pole_azimuth_coverage_fraction=nominal_fraction,
+                clipped_peak_count=sum(p.get("coverage_qc")=="CLIPPED_OR_GAPPED" for p in peaks))
+
 
 def emit(stage, **items):
     print("PROGRESS_JSON:" + json.dumps(dict(stage=stage, **items), ensure_ascii=False), flush=True)
@@ -108,9 +209,12 @@ def parse_frame(path):
     m = FRAME_RE.match(p.stem)
     sample = m.group("sample") if m else p.stem
     point = m.group("point") if m else None
-    hint = re.search(r"(?<!\d)(\d{3})(?:_2D|\b)", sample, flags=re.IGNORECASE)
+    hint = reflection_hint(sample)
+    wavelengths={key:num(root.findtext(".//Wavelength"+key)) for key in ("Kalpha1","Kalpha2","Kbeta")}
     return dict(path=str(p), source_name=p.name, sample=sample,
-        reflection_hint=(hint.group(1) if hint else "not specified"),
+        source_wavelengths_A=wavelengths,wave_type=root.findtext(".//WaveType"),
+        anode_target=root.findtext(".//TargetName"),
+        reflection_hint=hint,
         acquisition_suffix=point, seq=(int(m.group("seq")) if m else None),
         frame_no=(int(m.group("frame")) if m else None), 
         phi=phi % 360., chi=chi, x=ax.get("X"), y=ax.get("Y"),
@@ -191,7 +295,7 @@ def series_summary(rows):
         sweep_deg=float(np.median(actual_sweeps)) if actual_sweeps else 0.,
         warnings=warnings)
 
-def validate_group(rows):
+def validate_group(rows,config=None):
     series = collections.defaultdict(list)
     for r in rows:
         series[round(r["chi"], 4)].append(r)
@@ -212,14 +316,21 @@ def validate_group(rows):
         warnings.append("Only one Chi setting: limited radial pole coverage")
     if not (abs(first["two_theta"]-32.6)<.3 and abs(first["omega"]-16.3)<.3):
         warnings.append("Detector coordinate mapping extended beyond validated LMO(011); verify against SmartLab")
-    return dict(series=series, per_chi=summaries, warnings=warnings, full_turn=all(s["full_turn"] for s in summaries.values()))
+    reference, notes = reflection_notes(first,config)
+    warnings.extend(notes)
+    return dict(series=series, per_chi=summaries, warnings=warnings, reference=reference, full_turn=all(s["full_turn"] for s in summaries.values()))
 
-def detector_map(row):
+def detector_map(row, include_tth=False, config=None):
     """Map detector pixels to specimen tilt/azimuth using the known HyPix H mounting."""
     width, height = row["dimensions"]
     u, v = np.meshgrid(np.arange(width), np.arange(height))
     cx, cy, pitch_x, pitch_y = row["detector_origin"]
     distance = float(row["detector_distance"])
+    if config:
+        cx += config["detector_center_offset_px"][0]
+        cy += config["detector_center_offset_px"][1]
+        distance += config["detector_distance_offset_mm"]
+    if distance <= 0: raise ValueError("Non-positive corrected detector distance")
     tt = math.radians(row["two_theta"])
     om = math.radians(row["omega"])
     du = (u - cx) * pitch_x
@@ -247,7 +358,8 @@ def detector_map(row):
         raise ValueError(f"Detector has insufficient two-theta ROI around {row['two_theta']} degrees")
     if bg_left.sum() < 50 or bg_right.sum() < 50:
         raise ValueError("Detector lacks sidebands for safe background subtraction")
-    return tilt, azimuth, signal, bg_left, bg_right
+    result = (tilt, azimuth, signal, bg_left, bg_right)
+    return (*result, tth) if include_tth else result
 
 def frame_image(row):
     width, height = row["dimensions"]
@@ -261,8 +373,8 @@ def frame_image(row):
         raw = z.read(member)
     return np.frombuffer(raw, dtype=dtype).reshape(height, width)
 
-def reconstruct(rows, dest, callback=None, phi_bins=180, tilt_bins=90):
-    valid = validate_group(rows)
+def reconstruct(rows, dest, callback=None, phi_bins=180, tilt_bins=90, config=None):
+    valid = validate_group(rows,config)
     grid = np.zeros((tilt_bins, phi_bins), dtype=float)
     exposure_weights = np.zeros_like(grid)
     per_chi = []
@@ -270,19 +382,33 @@ def reconstruct(rows, dest, callback=None, phi_bins=180, tilt_bins=90):
     done = 0
     last_update = 0.
     bin_angle = 360. / phi_bins
+    config = config or lattice.settings()
+    radial = lattice.RadialCube(rows[0]["two_theta"],tilt_bins,phi_bins)
     for chi, seq in sorted(valid["series"].items()):
-        ref = seq[0]
-        tilt, az, signal, bg1, bg2 = detector_map(ref)
-        inds = np.flatnonzero(signal)
-        ti = np.floor(tilt.flat[inds]).astype(np.intp)
-        ai = az.flat[inds]
-        base = ti * phi_bins
+        geometry = None
         accepted = 0
         sum_raw = 0.
+        tilt_min, tilt_max = 90., 0.
         for row in sorted(seq, key=lambda r:(r["phi"],r["source_name"])):
+            sig = (row["two_theta"],row["omega"],row["chi"],tuple(row["dimensions"]),
+                   tuple(row["detector_origin"]),row["detector_distance"])
+            if sig != geometry:
+                tilt, az, signal, bg1, bg2, tth = detector_map(row,True,config)
+                inds = np.flatnonzero(signal)
+                ti = np.floor(tilt.flat[inds]).astype(np.intp)
+                ai = az.flat[inds]
+                base = ti * phi_bins
+                rind=np.flatnonzero((np.abs(tth-rows[0]["two_theta"])<lattice.RADIAL_HALF)&(tilt>=0)&(tilt<90))
+                rbase=np.floor(tilt.flat[rind]).astype(np.intp)*phi_bins
+                raz=az.flat[rind]
+                rb=radial.bins(tth.flat[rind])
+                geometry = sig
+                tilt_min = min(tilt_min,float(tilt[signal].min()))
+                tilt_max = max(tilt_max,float(tilt[signal].max()))
             image = frame_image(row)
             bkg = .5 * (float(image[bg1].mean()) + float(image[bg2].mean()))
             rate = (image.flat[inds].astype(float) - bkg) / (row["exposure_ms"] / 1000.)
+            rrate=(image.flat[rind].astype(float)-bkg)/(row["exposure_ms"]/1000.)
             sum_raw += float(image[signal].sum())
             if row["mode"] == "CONTINUOUS" and row["sweep_deg"] > 0:
                 # 5-point quadrature for the actual Phi window, including the wrap.
@@ -297,6 +423,8 @@ def reconstruct(rows, dest, callback=None, phi_bins=180, tilt_bins=90):
                 exposure_weights += np.bincount(
                     idx, weights=np.full(len(idx), 1./len(phis)),
                     minlength=phi_bins*tilt_bins).reshape(tilt_bins,phi_bins)
+                ridx=rbase+(np.floor((raz+phi+bin_angle/2.)%360./bin_angle).astype(np.intp)%phi_bins)
+                radial.add(ridx,rb,rrate,1./len(phis))
             done += 1
             accepted += 1
             now = time.monotonic()
@@ -304,10 +432,13 @@ def reconstruct(rows, dest, callback=None, phi_bins=180, tilt_bins=90):
                 callback(done,total,row["source_name"])
                 last_update = now
         per_chi.append(dict(chi_deg=chi, frames=accepted, sum_raw_counts=sum_raw,
-                            roi_pixel_count=len(inds), bg_pixel_count=int(bg1.sum()+bg2.sum())))
+                            roi_pixel_count=len(inds), bg_pixel_count=int(bg1.sum()+bg2.sum()),
+                            signal_tilt_min_deg=tilt_min,
+                            signal_tilt_max_deg=tilt_max))
     intensity = np.divide(grid, exposure_weights, out=np.full_like(grid,np.nan), where=exposure_weights > 0)
     np.savez_compressed(dest/"map.npz", intensity=intensity, coverage=exposure_weights,
         tilt=np.arange(tilt_bins)+.5, azimuth=np.arange(phi_bins)*bin_angle+bin_angle/2.)
+    radial.save(dest/"Radial_Cube.npz")
     return intensity, exposure_weights, dict(valid, chi_stats=per_chi)
 
 def fit_peaks(data, coverage, n_max=10):
@@ -451,13 +582,18 @@ def _table(ax,headers,rows,col_widths=None,font=8):
         elif r%2==0:
             cell.set_facecolor("#eef3f7")
 
-def write_point_pdf(dest, item, data, cov, peaks, acquisition):
+def write_point_pdf(dest, item, data, cov, peaks, acquisition, config=None):
     sample=item["sample"]
     report_file=dest/"Pole_Figure_Report.pdf"
     nvalid=int(np.count_nonzero(cov>0))
     ntot=int(cov.size)
     pct=100*nvalid/max(ntot,1)
+    ref = item.get("reflection_reference", {})
+    coverage_info = item.get("coverage_qc", {})
+    hkl = ref.get("nominal_lmo_hkl", "unassigned")
+    psi = ref.get("nominal_pole_deg")
     cap = f"{sample} | 2theta={item['two_theta_deg']:.3f} deg | {item['frames']} 2D frames"
+    if hkl != "unassigned": cap += f" | hkl {hkl} reference"
     finite=data[np.isfinite(data) & (cov>0)]
     vmax=float(np.percentile(finite,99.7)) if finite.size else 1.
     vmax=max(vmax, .0001)
@@ -471,6 +607,8 @@ def write_point_pdf(dest, item, data, cov, peaks, acquisition):
         info=[
             f"Sample: {sample}",
             f"hkl hint: {item['reflection_hint']} (filename only)",
+            f"LMO angle candidate: {ref.get('lmo_angle_candidate','unassigned')}",
+            f"Nominal pole: {psi:.2f} deg" if psi is not None else "Nominal pole: not assigned",
             f"Detector: {item['detector']}",
             f"2theta: {item['two_theta_deg']:.3f} deg",
             f"omega: {item['omega_deg']:.3f} deg",
@@ -478,6 +616,7 @@ def write_point_pdf(dest, item, data, cov, peaks, acquisition):
             f"Frames: {item['frames']}; peaks fitted: {len(peaks)}",
             f"Map bins: {nvalid}/{ntot} ({pct:.1f}%)",
             f"Phi coverage: {item['phi_completeness']}",
+            f"FWHM coverage flags: {coverage_info.get('clipped_peak_count','-')}",
             f"Status: {item['status']}",
             f"XY: X={item['x_mm']} mm, Y={item['y_mm']} mm",
             "",
@@ -508,9 +647,9 @@ def write_point_pdf(dest, item, data, cov, peaks, acquisition):
                 return f"{v:.2f}" if isinstance(v,(int,float)) else "-"
             peak_rows.append([p["rank"],fmt("beta_deg"),fmt("tilt_deg"),
                               fmt("phi_fwhm_observed_deg"),fmt("tilt_fwhm_observed_deg"),
-                              fmt("fit_r2"),p.get("status","?")])
+                              fmt("fit_r2"),p.get("status","?"),p.get("coverage_qc","-")])
         tab=fig.add_axes([.06,.08,.90,.23])
-        _table(tab,["#","Beta (deg)","Tilt (deg)","FWHM beta","FWHM tilt","R2","Fit QC"],
+        _table(tab,["#","Beta (deg)","Tilt (deg)","FWHM beta","FWHM tilt","R2","Fit QC","Coverage QC"],
                peak_rows,font=8)
         pdf.savefig(fig);plt.close(fig)
         fig=plt.figure(figsize=(11.7,8.3),facecolor="white")
@@ -532,6 +671,14 @@ def write_point_pdf(dest, item, data, cov, peaks, acquisition):
                          f"{meta['exposure_ms_min']:.0f}-{meta['exposure_ms_max']:.0f}"])
         tab=fig.add_axes([.06,.20,.90,.17])
         _table(tab,["Chi (deg)","Frames","Phi step","Sweep","Mode","360 deg","Exposure (ms)"],rows,font=8)
+        # The plotted coverage is from actual frame data, not an ideal PF.
+        summary=coverage_info
+        lo,hi=summary.get("measured_tilt_min_deg"),summary.get("measured_tilt_max_deg")
+        frac=summary.get("nominal_pole_azimuth_coverage_fraction")
+        if lo is not None and hi is not None:
+            fig.text(.07,.38,f"Measured tilt bins: {lo:.1f} to {hi:.1f} deg" +
+                     (f" | nominal pole azimuth coverage: {100*frac:.1f}%" if frac is not None else ""),
+                     fontsize=8.5,color="#425670")
         warn=acquisition["warnings"]
         fig.text(.07,.16,"QUALITY / GEOMETRY NOTES",fontsize=9,fontweight="bold",color="#425670")
         message="\n".join("- "+x for x in warn[:6]) if warn else "- No acquisition gaps or metadata inconsistencies detected."
@@ -565,17 +712,35 @@ def write_point_pdf(dest, item, data, cov, peaks, acquisition):
                              f"FWHM {p.get('phi_fwhm_observed_deg',float('nan')):.1f} deg",fontsize=9)
             fig.tight_layout(rect=[.04,.06,.98,.87])
             pdf.savefig(fig);plt.close(fig)
+        try:
+            lattice_report.point_pages(pdf,dest,item,data,cov,peaks,config or lattice.settings())
+        except Exception as exc:
+            item.setdefault("warnings",[]).append("Lattice report extension failed: "+str(exc))
+            (dest/"Lattice_Report_Error.txt").write_text(traceback.format_exc(),encoding="utf-8")
+            fig=lattice_report.new_page("Lattice report extension error",str(item["sample"]))
+            fig.text(.07,.75,"See Lattice_Report_Error.txt. Existing pole pages and numerical outputs retained.",fontsize=10)
+            lattice_report.finish(pdf,fig)
     return str(report_file)
 
 def summarize_row(item):
     subset={k:item.get(k) for k in ("sample","reflection_hint","position_suffix",
             "x_mm","y_mm","two_theta_deg","omega_deg","detector",
             "frames","chi_angles_deg","phi_completeness","n_peaks","status","reason","warnings")}
+    ref=item.get("reflection_reference", {})
+    qc=item.get("coverage_qc", {})
+    subset.update({k:ref.get(k) for k in ("lmo_angle_candidate","nominal_lmo_hkl","nominal_pole_deg","two_theta_offset_deg","label_basis")})
+    subset.update(qc)
+    la=item.get("lattice_analysis",{})
+    subset["lattice_analysis_status"]=la.get("status")
+    cell=la.get("lattice",{})
+    subset["lattice_status"]=cell.get("status")
+    for k in ("a_A","b_A","c_A","strain_a_pct","strain_b_pct","strain_c_pct","volume_A3","volume_change_pct","relative_rms"):
+        subset[k]=cell.get(k)
     subset["chi_angles_deg"]=";".join(str(x) for x in item.get("chi_angles_deg",[]))
     subset["warnings"]="; ".join(item.get("warnings",[]))
     return subset
 
-def write_overall_report(output,records):
+def write_overall_report(output,records,config=None,combined=None):
     """Comparative QC across all discovered groups, including partial/failed ones."""
     report=output/"Overall_Pole_Figure_Report.pdf"
     ok=[r for r in records if r.get("status") in ("OK","PARTIAL")]
@@ -662,11 +827,21 @@ def write_overall_report(output,records):
         ]
         fig.text(.08,.85,"\n\n".join("- "+x for x in notes),fontsize=11,color="#3f5063",va="top",linespacing=1.6)
         pdf.savefig(fig);plt.close(fig)
+        try:
+            lattice_report.batch_pages(pdf,output,records,config or lattice.settings(),combined or [])
+        except Exception as exc:
+            (output/"Batch_Lattice_Report_Error.txt").write_text(traceback.format_exc(),encoding="utf-8")
+            fig=lattice_report.new_page("Batch lattice report extension error","Existing batch pages and numeric exports retained.")
+            fig.text(.07,.75,"See Batch_Lattice_Report_Error.txt.",fontsize=10)
+            lattice_report.finish(pdf,fig)
     return str(report)
 
-def save_report_package(out,records,rejected):
+def save_report_package(out,records,rejected,config=None):
+    config=config or lattice.settings()
+    lattice.write_settings(out,config)
+    combined=lattice_report.export_results(out,records,config,export_csv)
     payload=dict(version=VERSION,created_utc=dt.datetime.now(dt.timezone.utc).isoformat(),
-                 groups=records,rejected_files=rejected,notes=NOTE)
+                 groups=records,rejected_files=rejected,notes=NOTE,lattice_settings=config,combined_physical_points=combined)
     (out/"inspection.json").write_text(json.dumps(payload,indent=2,ensure_ascii=False),encoding="utf-8")
     export_csv(out/"Summary.csv",[summarize_row(x) for x in records])
     export_csv(out/"Rejected_Files.csv",rejected,["file","error"])
@@ -676,7 +851,7 @@ def save_report_package(out,records,rejected):
             peak_table.append(dict(point=row.get("point"),sample=row.get("sample"),
                 two_theta_deg=row.get("two_theta_deg"),sample_status=row.get("status"),**p))
     export_csv(out/"All_Peaks.csv",peak_table)
-    return write_overall_report(out,records)
+    return write_overall_report(out,records,config,combined)
 
 def _safe_out(source,destination):
     root=pathlib.Path(source).resolve()
@@ -710,7 +885,8 @@ def _select_jobs(groups,group_key=None,position=None):
         raise ValueError("Position selection ambiguous: use --group-key for an exact group")
     return ordered,jobs
 
-def run(source,output,inspect=False,group_key=None,position=None):
+def run(source,output,inspect=False,group_key=None,position=None,config=None):
+    config=config or lattice.settings()
     emit("start",source=str(source),version=VERSION)
     groups,rejected=discover(source)
     if not groups:
@@ -726,7 +902,7 @@ def run(source,output,inspect=False,group_key=None,position=None):
              two_theta=rows[0]["two_theta"])
     if inspect:
         for n,key,rows in jobs:
-            qc=validate_group(rows)
+            qc=validate_group(rows,config)
             print(json.dumps(dict(group=n,sample=key[1],n_frames=len(rows),
                  chi=qc["per_chi"],warnings=qc["warnings"]),ensure_ascii=False),flush=True)
         return 0
@@ -734,6 +910,7 @@ def run(source,output,inspect=False,group_key=None,position=None):
     records=[]
     for j,(n,key,rows) in enumerate(jobs,1):
         first=rows[0]
+        point_config=lattice.effective_settings(config,first)
         label=key[1]
         folder=f"sample_{n:03d}_{safe_name(label)}"
         item=dict(point=n,folder=folder,sample=label,
@@ -744,8 +921,9 @@ def run(source,output,inspect=False,group_key=None,position=None):
                   n_peaks=0,peaks=[],status="FAILED",warnings=[])
         emit("point_start",point=n,index=j,total=len(jobs),frames=len(rows),sample=label)
         try:
-            qc=validate_group(rows)
+            qc=validate_group(rows,point_config)
             item["warnings"]=list(qc["warnings"])
+            item["reflection_reference"]=qc["reference"]
             item["phi_completeness"]="complete" if qc["full_turn"] else "partial"
             item["status"]="OK" if qc["full_turn"] else "PARTIAL"
             dest=out/folder
@@ -754,14 +932,21 @@ def run(source,output,inspect=False,group_key=None,position=None):
             data,cov,extra=reconstruct(rows,dest,
                 callback=lambda done,total,name:emit("frame_progress",
                     point=n,index=j,total=len(jobs),frames_done=done,
-                    frames_total=total,current_file=name))
+                    frames_total=total,current_file=name),config=point_config)
             emit("fit_and_report",point=n,index=j,total=len(jobs))
             peaks=fit_peaks(data,cov)
             if not peaks: item["warnings"].append("No reliable 2D peak found at the measured coverage")
+            item["coverage_qc"]=coverage_check(cov,peaks,qc["reference"])
+            if item["coverage_qc"]["clipped_peak_count"]:
+                item["warnings"].append("One or more fitted FWHM boxes intersect unmeasured bins; widths require review.")
+            frac=item["coverage_qc"]["nominal_pole_azimuth_coverage_fraction"]
+            if frac is not None and frac < .98:
+                item["warnings"].append("Incomplete measured azimuth coverage at the nominal LMO pole angle.")
             item.update(peaks=peaks,n_peaks=len(peaks))
             acquisition=dict(version=VERSION,sample=label,n_frames=len(rows),
                 per_chi=qc["per_chi"],warnings=item["warnings"],
                 chi_stats=extra["chi_stats"],motor_reference=first,
+                reflection_reference=qc["reference"],coverage_qc=item["coverage_qc"],
                 method="Measured 2D HyPix projection + exposure-normalized counts / second",
                 map_grid=dict(tilt_bin_deg=1.,azimuth_bin_deg=2.),notes=NOTE)
             (dest/"acquisition.json").write_text(
@@ -769,7 +954,8 @@ def run(source,output,inspect=False,group_key=None,position=None):
             (dest/"peaks.json").write_text(json.dumps(peaks,indent=2),encoding="utf-8")
             export_csv(dest/"peaks.csv",peaks)
             export_csv(dest/"chi_series.csv",extra["chi_stats"])
-            write_point_pdf(dest,item,data,cov,peaks,acquisition)
+            process_lattice(dest,item,peaks,point_config)
+            write_point_pdf(dest,item,data,cov,peaks,acquisition,point_config)
         except Exception as exc:
             item.update(status="FAILED",reason=str(exc))
             item["warnings"].append(f"Analysis error: {exc}")
@@ -778,17 +964,21 @@ def run(source,output,inspect=False,group_key=None,position=None):
         emit("point_done",point=n,index=j,total=len(jobs),status=item["status"],
              reason=item.get("reason",""),sample=label)
     emit("summary",total=len(records))
-    overall=save_report_package(out,records,rejected)
+    overall=save_report_package(out,records,rejected,config)
     failed=sum(x["status"]=="FAILED" for x in records)
     partial=sum(x["status"]=="PARTIAL" for x in records)
     emit("complete",total=len(records),successful=len(records)-failed,failed=failed,
          partial=partial,output=str(out),report=overall)
     return 2 if failed else 0
 
-def rebuild(source,output):
+def rebuild(source,output,config=None):
     src=pathlib.Path(source)
     meta=json.loads((src/"inspection.json").read_text(encoding="utf-8"))
-    if meta.get("version") not in ("1.4.0", VERSION):
+    old_config=dict(lattice.settings(),**meta.get("lattice_settings",{}))
+    if config is None: config=old_config
+    if any(config[k]!=old_config.get(k,lattice.DEFAULT[k]) for k in ("detector_center_offset_px","detector_distance_offset_mm")):
+        raise ValueError("Changed detector geometry requires raw RASX reconstruction, not cached maps")
+    if meta.get("version") not in ("1.4.0", "1.4.1", "1.5.0", VERSION):
         raise ValueError("Saved maps have a different schema/version; use v1.3 reports-only for legacy maps")
     out=_safe_out(source,output)
     rows=[]
@@ -808,16 +998,43 @@ def rebuild(source,output):
                     shutil.copy2(old/"chi_series.csv",new/"chi_series.csv")
                 (new/"acquisition.json").write_text(json.dumps(acquisition,indent=2),encoding="utf-8")
                 peaks=fit_peaks(data,cov)
+                point_config=lattice.effective_settings(config,acquisition["motor_reference"])
+                ref=reflection_context(acquisition["motor_reference"],point_config)
+                row["reflection_reference"]=ref
+                row["coverage_qc"]=coverage_check(cov,peaks,ref)
+                acquisition.update(reflection_reference=ref,coverage_qc=row["coverage_qc"])
+                (new/"acquisition.json").write_text(json.dumps(acquisition,indent=2),encoding="utf-8")
                 row["peaks"]=peaks
                 row["n_peaks"]=len(peaks)
                 (new/"peaks.json").write_text(json.dumps(peaks,indent=2),encoding="utf-8")
                 export_csv(new/"peaks.csv",peaks)
-                write_point_pdf(new,row,data,cov,peaks,acquisition)
+                if (old/"Radial_Cube.npz").is_file():
+                    import shutil
+                    shutil.copy2(old/"Radial_Cube.npz",new/"Radial_Cube.npz")
+                process_lattice(new,row,peaks,point_config)
+                write_point_pdf(new,row,data,cov,peaks,acquisition,point_config)
             except Exception as exc:
                 row.update(status="FAILED",reason="Reports rebuild: "+str(exc))
         rows.append(row)
-    save_report_package(out,rows,meta.get("rejected_files",[]))
+    save_report_package(out,rows,meta.get("rejected_files",[]),config)
     return 2 if any(r["status"]=="FAILED" for r in rows) else 0
+
+def process_lattice(dest,item,peaks,config):
+    try:
+        result=lattice.analyze_profiles(dest,item,peaks,config)
+    except Exception as exc:
+        result=dict(status="LATTICE_ANALYSIS_FAILED",error=str(exc),peaks=[],notice=lattice.NOTICE)
+        (dest/"Lattice_Analysis_Error.txt").write_text(traceback.format_exc(),encoding="utf-8")
+        item["warnings"].append("Lattice extension failed; see diagnostic file: "+str(exc))
+    item["lattice_analysis"]=result
+    item["effective_wavelength_A"]=config["wavelength_A"]
+    lattice.write_settings(dest,config)
+    (dest/"Lattice_Analysis.json").write_text(json.dumps(result,indent=2),encoding="utf-8")
+    export_csv(dest/"Reflection_dSpacing.csv",result.get("peaks",[]))
+    cell=result.get("lattice",{})
+    export_csv(dest/"Lattice_Parameters.csv",[cell or {"status":result["status"]}])
+    export_csv(dest/"Lattice_Strain.csv",[{k:v for k,v in cell.items() if "strain" in k or k=="status"}] or [])
+    (dest/"Strain_Tensor.json").write_text(json.dumps(cell,indent=2),encoding="utf-8")
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -827,12 +1044,14 @@ def main():
     p.add_argument("--reports-only",action="store_true")
     p.add_argument("--group-key")
     p.add_argument("--position",type=int)
+    p.add_argument("--reference-config",help="Optional JSON material, reference lattice, indexing and calibration settings")
     args=p.parse_args()
     if not args.inspect and not args.output:
         p.error("--output required for analysis or report rebuild")
+    config=lattice.settings(args.reference_config) if args.reference_config else None
     if args.reports_only:
-        sys.exit(rebuild(args.source,args.output))
-    sys.exit(run(args.source,args.output,args.inspect,args.group_key,args.position))
+        sys.exit(rebuild(args.source,args.output,config))
+    sys.exit(run(args.source,args.output,args.inspect,args.group_key,args.position,config))
 
 if __name__=="__main__":
     main()

@@ -1,3 +1,84 @@
+# v1.5.1 - Universal measured radial diffraction and lattice strain
+
+One Windows application for Rigaku SmartLabXE / horizontal HyPix pole-figure RASX data. This release retains the published v1.4.1 pipeline and incorporates the v1.5.0 Deniz coverage changes. The old fixed-geometry worker and old report rebuild remain available. All new UI and reports are English; raw acquisitions are read-only.
+
+## Start here
+
+1. Select the folder containing raw 2D Phi-scan RASX files (including subfolders).
+2. Set an output parent (it may not exist yet).
+3. Optionally choose **Reference JSON** or use **Reference & Calibration...** to edit and save a JSON profile. The default LMO pseudocubic 3.880 A and wavelength 1.5406 A are only nominal, unconfirmed assumptions.
+4. Select one group or all measured groups; click **Analyze & Generate Reports**.
+5. See the individual PDF and CSV in each sample folder and the overall PDF, batch CSV and combined-point JSON in the new timestamped result directory.
+
+The same program accepts 011, 111, 222 and other explicitly named/assigned hkl, other reference cells, arbitrary recorded Phi steps and supported detector motor settings. A filename or angle match is never a phase identification. Other mounting conventions, 1D scans, and non-Phi acquisition modes still fail explicitly. In-plane/axial or incomplete pole coverage may allow aggregate d-spacing but not a full indexed cell. Geometry outside the previously verified 011 setup requires experimental calibration.
+
+## Radial analysis
+
+The per-pixel absolute scattering angle is reconstructed from the recorded frame geometry. The original exposure-normalized, sideband-subtracted pole map is retained. In that same image read, counts and pixel coverage are accumulated into a (tilt, beta, 2theta) cube, with 0.025 deg radial bins over nominal 2theta +/-2.4 deg (independent of the original +/-1.2 deg pole-map ROI). Motor angles alone are not fitted peak positions. Peaks outside this window cannot be recovered by cached-map re-reporting.
+
+For each resolved pole, a central angular aperture selects the radial profile; the observed intensity is averaged using actual sampled-pixel coverage. A Gaussian with a free linear background is fitted. Optional fixed-ratio equal-width wavelength doublet fitting is available if the optics justify it. Missing bins remain missing. Unresolved, clipped, gapped or poor profiles are rejected; the aggregate fallback is clearly marked rank 0 and must never be used as an indexed reciprocal vector.
+
+The measured angle and configured or header-derived wavelength determine d=lambda/[2 sin(2theta/2)]. Each pole has a fitted direction and reciprocal vector g=(s_out-s_in)/lambda, in inverse Angstrom, without 2*pi. The vector azimuth corrects a historical half-bin offset in the stored pole-map convention; original beta reports remain unchanged for comparison. The direction still comes from the fitted integrated pole map rather than a full joint 3D peak fit. Phi sweeps use the recorded angular interval. Angular and radial sampling, overlapping phases, spatial displacement and detector calibration can bias the result.
+
+## Indexed cell and deformation
+
+The solver uses signed, correctly indexed reciprocal vectors H and G in the same single domain. In row notation, G=H B^T; the fitted reciprocal basis B gives direct basis A=B^-T. Reject rank-deficient, ill-conditioned, left-handed or inconsistent solutions. A rank-three solution using exactly three vectors has no redundancy. With a reference direct basis A0, F=A A0^-1. SVD gives the rotation and symmetric left stretch V, with strain represented as V-I in specimen coordinates. Pure rigid rotation does not create strain. Cell lengths, angles, volume, relative length/volume changes, principal strains/directions and specimen-normal/tape-axis projections are exported when determinable. Tape directions require a separately calibrated azimuth. This is a lattice-deformation model, not a mechanical stress or elastic-modulus measurement.
+
+There are three indexing routes:
+
+- Explicit signed hkl_by_rank entries for a known exact sample/acquisition. Verify ranks against that run; intensity rank is not a stable crystallographic identity across points.
+- For a confirmed single-domain cubic texture, set cube_texture_azimuth_deg to the crystal a-axis azimuth and assume_single_domain=true. The code checks nearest candidate uniqueness and pole coverage.
+- Default exploratory mode may infer a **hypothetical** four-pole cubic texture model for {011}, {111}, {222}, only if four resolved and covered vectors match the expected symmetry. The result is explicitly hypothetical and a/b labels are symmetry-ambiguous; this is not an independently indexed, calibrated cell. Disable allow_hypothetical_four_pole_cell to suppress it. Hypothetical indexing is never used in a cross-reflection combined solution.
+
+If any required information is unavailable, the program reports N/A and a status, rather than inventing cell parameters. A single 002 or 200 d-spacing does not determine the general 3D cell.
+
+The reference d-spacing is computed from the configurable reference cell metric. For noncubic cells, a family hint alone does not specify which permutation/sign member was measured; explicit indexing is needed for directional reference strain. Reference, wavelength and calibration confirmation flags are user declarations. Fit sigma is model-fit uncertainty, not absolute instrument accuracy. Optionally supply two_theta_systematic_sigma_deg and angular_sigma_deg for a conditional Monte Carlo uncertainty calculation; phase, wavelength, reference and sample-position systematic errors are not included.
+
+See [example reference JSON](examples/reference_lmo.json). If use_header_wavelength is true and the manual wavelength is not confirmed, an explicitly recorded Ka/Ka1/Ka2/Kb line supplies its nominal wavelength. Generic Ka does not verify monochromatization. All lengths are Angstrom unless explicitly in mm, all angles are degrees, and detector center offsets are pixels. two_theta_offset_deg is added to the raw measured radial center; detector_center_offset_px and detector_distance_offset_mm change the actual reconstruction and require reprocessing raw files. Do not use these offsets to force agreement with a nominal reference.
+
+For cross-reflection cell reconstruction, explicit indexing rules can assign the same physical_point_id to the same actual specimen point and domain. Exact source-folder/sample/position suffix matching prevents accidental merging. Stage XY coordinates must also agree; identical XY values alone never justify joining different samples. Example rule:
+
+~~~json
+{
+  "sample": "LMO_011",
+  "position_suffix": "01",
+  "physical_point_id": "verified-specimen-A-position-01",
+  "family_hkl": [0,1,1],
+  "hkl_by_rank": {"1":[1,0,1], "2":[0,1,1], "3":[-1,0,1], "4":[0,-1,1]}
+}
+~~~
+
+The example ranks are illustrative only, not a verified assignment for any raw measurement.
+
+## Reports and outputs
+
+Existing measured PF, acquisition coverage, peak tables, local maps and batch comparison pages remain. New pages include fitted pole cuts, conditional cone tilt, radial profiles, d-spacing and fit QC, cell/tensor tables, 3D cell diagrams, XY scatter maps (zero-centered signed scales), trends and histograms. No interpolation of unmeasured areas. All peak and cell data are machine-readable. Unassigned pole ranks are not crystallographically tracked between XY points.
+
+Per-point: Radial_Cube.npz, Radial_Profiles.npz, Lattice_Analysis.json, Reflection_dSpacing.csv, Lattice_Parameters.csv, Lattice_Strain.csv, Strain_Tensor.json, Lattice_Settings.json, peak_profile_cuts.csv, structure_tilt.json, plus previous files. Batch: Batch_Lattice_Summary.csv, Reflection_dSpacing.csv, Lattice_Parameters.csv, Lattice_Strain.csv, Strain_Tensor.json, Combined_Physical_Points.json, Lattice_Settings.json, and the original summary/export files.
+
+Cached **Rebuild PDFs from Saved Maps** can refit profiles and use a changed wavelength/reference/2theta offset from Radial_Cube.npz without rereading RASX. Old integrated maps have no radial axis; their lattice status is RAW_RADIAL_DATA_REQUIRED. A changed detector center/distance must be reconstructed from raw files. Legacy v1.3 integrated-map reports still use the original formatter; process raw RASX for new strain information.
+
+~~~powershell
+LMO-PF2D-Analyzer-v1.5.1.exe --analyze --source "D:\Raw\PF2D" --output "D:\Results\NEW" --reference-config "D:\Reference.json"
+LMO-PF2D-Analyzer-v1.5.1.exe --analyze --reports-only --source "D:\Results\NEW" --output "D:\Results\REFIT" --reference-config "D:\Reference2.json"
+~~~
+
+## Scientific references and validation boundary
+
+- IUCr, [The reciprocal lattice](https://www.iucr.org/what-we-do/education/pamphlets/reciprocal-lattice): scattering vector and Bragg relation.
+- [Improved calibration of area detectors using multiple placements](https://journals.iucr.org/s/issues/2019/06/00/co5127/): beam center, distance, pixel dimensions, detector tilt and wavelength are needed for reliable angular calibration.
+- [pyFAI calibration documentation](https://www.silx.org/doc/pyFAI/dev/calibration.html): calibrant-based geometry refinement and independent visual verification.
+
+Synthetic tests check exact lattice inversion including pure rotation, isotropic strain down to 0.01% in the mathematical model, anisotropic and shear strain, rank failure, radial profiles, doublets, clipped/gapped data, cached re-reporting and actual RASX decoding. A mathematical test at 0.01% does **not** establish experimental sensitivity to 0.01%. Validate against a calibrated standard and independent theta-2theta measurements before using these outputs as acceptance criteria. Actual raw laboratory data and internal paths are not published.
+
+## Historical documentation follows
+
+The older version descriptions below remain for reproducibility. Their fixed geometry limitations and screenshots refer to those releases, not the v1.5.1 universal worker.
+
+# v1.5.0 - LMO 011 / 111 / 222
+
+Universal RASX analysis based on actual motor/detector metadata. New explicit PF111/PF222 recognition, nominal LMO angle candidates, per-chi angular coverage, and fit coverage QC. Existing v1.4.0/1.4.1 maps can be rebuilt. Filename and Bragg-angle hints are not phase identification. Real 111/222 measurement validation is pending; raw files are read-only. Nominal reference assumes pseudocubic LMO a=3.880 A, Cu K-alpha 1.5406 A.
+
 # LMO PF2D XY Analyzer
 
 Windows GUI for **Rigaku SmartLabXE / HyPix-3000(H)** 2D pole-figure datasets. Processes one measured position or a batch of XY positions; produces per-point 2D pole figures, four independent peak fits, observed azimuthal FWHM, tilt and beta-cut FWHM, plus overall CSV/JSON and PDF maps.

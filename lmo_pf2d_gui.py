@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """LMO PF2D Analyzer - read-only Rigaku RASX pole-figure GUI for Windows.
-Build: pyinstaller --noconfirm --clean --onefile --console --hide-console hide-early --name LMO-PF2D-Analyzer-v1.4.1
+Build: pyinstaller --noconfirm --clean --onefile --console --hide-console hide-early --name LMO-PF2D-Analyzer-v1.5.1
        --add-data "analysis;analysis" lmo_pf2d_gui.py
 No Rigaku instrument control, X-ray generation, network/cloud mutations, or raw-file edits.
 """
@@ -24,7 +24,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
-VERSION="1.4.1"
+VERSION="1.5.1"
 TITLE="Rigaku 2D Pole Figure Analyzer  |  HyPix-3000(H)"
 RASX_PATTERN=re.compile(
     r"^(?P<stem>.+)_image_(?P<seq>\d+)_(?P<chi>-?\d+(?:\.\d+)?)_(?P<num>\d+)\.rasx$",re.I)
@@ -196,8 +196,10 @@ def run_analyze_mode(args: list[str]):
         try:
             ix=args.index("--source")+1
             meta=json.loads((pathlib.Path(args[ix])/"inspection.json").read_text(encoding="utf-8"))
-            if meta.get("version") not in ("1.4.0","1.4.1"):target=bundled("analysis/adaptive_pf2d.py")
+            if meta.get("version") not in ("1.4.0","1.4.1","1.5.0","1.5.1"):target=bundled("analysis/adaptive_pf2d.py")
         except (OSError,ValueError,IndexError):pass
+    if target.name=="adaptive_pf2d.py" and "--reference-config" in args:
+        raise ValueError("Legacy cached maps cannot provide lattice data. Clear reference config for legacy rebuild, or process raw RASX.")
     if not target.is_file():
         raise FileNotFoundError("Bundled analyzer not found: "+str(target))
     sys.argv=[str(target),*args]
@@ -216,11 +218,12 @@ def make_gui():
         def __init__(self):
             super().__init__()
             self.title(TITLE)
-            self.geometry("1120x780")
+            self.geometry("1120x850")
             self.minsize(920,660)
             self.configure(background="#f3f6fa")
             self.source=tk.StringVar()
             self.output_parent=tk.StringVar(value=str(pathlib.Path.home()/"Documents"/"LMO PF2D Reports"))
+            self.reference_config=tk.StringVar(value="")
             self.mode=tk.StringVar(value="batch")
             self.position=tk.StringVar(value="1")
             self.info=tk.StringVar(value="Select a source folder, then click Analyze & Generate Reports. No separate file check required.")
@@ -274,6 +277,15 @@ def make_gui():
             ttk.Button(outrow,text="Browse...",command=self._browse_output).pack(side="left")
             ttk.Label(body,text="The output parent may be new. A timestamped results folder is created automatically; existing results are never overwritten.",
                       style="Small.TLabel").pack(anchor="w",pady=(1,11))
+
+            reference=ttk.Frame(body)
+            reference.pack(fill="x",pady=(0,8))
+            ttk.Label(reference,text="Reference JSON",width=19).pack(side="left")
+            ttk.Entry(reference,textvariable=self.reference_config).pack(side="left",fill="x",expand=True,padx=(3,8))
+            ttk.Button(reference,text="Browse...",command=self._browse_reference).pack(side="left",padx=(0,5))
+            ttk.Button(reference,text="Reference & Calibration...",command=self._edit_reference).pack(side="left")
+            ttk.Label(body,text="Optional: default nominal LMO/Cu K-alpha is unconfirmed. Use a calibrated reference JSON for quantitative strain.",
+                      style="Small.TLabel").pack(anchor="w",pady=(0,8))
 
             modes=ttk.Frame(body)
             modes.pack(fill="x",pady=(0,12))
@@ -340,6 +352,49 @@ def make_gui():
                                            initialdir=str(base) if base.is_dir() else str(pathlib.Path.home()))
             if folder:self.output_parent.set(folder)
 
+        def _browse_reference(self):
+            f=filedialog.askopenfilename(title="Select lattice reference/calibration JSON",
+                    filetypes=[("Reference settings","*.json"),("All files","*.*")])
+            if f:self.reference_config.set(f)
+
+        def _edit_reference(self):
+            from analysis import lattice_strain as lattice
+            win=tk.Toplevel(self)
+            win.title("Reference Lattice & Calibration")
+            win.geometry("780x650")
+            frame=ttk.Frame(win,padding=12);frame.pack(fill="both",expand=True)
+            ttk.Label(frame,text="Reference and calibration settings (JSON)",style="Header.TLabel").pack(anchor="w")
+            ttk.Label(frame,text="Edit material, wavelength, cell [a,b,c,alpha,beta,gamma], calibrated offsets and uncertainty. "
+                "Only confirm settings independently verified. Set cube_texture_azimuth_deg and assume_single_domain only when appropriate. "
+                "Explicit signed hkl assignments are optional; see the README. Save a JSON file to use it in this run.",
+                wraplength=740,justify="left").pack(anchor="w",pady=8)
+            editor=scrolledtext.ScrolledText(frame,font=("Consolas",10),wrap="none")
+            editor.pack(fill="both",expand=True)
+            current=self.reference_config.get().strip().strip('"')
+            try:
+                cfg=lattice.settings(current or None)
+            except Exception as exc:
+                messagebox.showerror("Invalid reference JSON",str(exc),parent=win)
+                cfg=lattice.settings()
+            editor.insert("1.0",json.dumps(cfg,indent=2))
+            def save():
+                path=filedialog.asksaveasfilename(parent=win,title="Save reference settings",
+                    defaultextension=".json",initialfile="LMO_Reference.json",filetypes=[("JSON","*.json")])
+                if not path:return
+                # Validate without overwriting a potentially valid existing file.
+                import tempfile
+                try:
+                    data=json.loads(editor.get("1.0","end"))
+                    with tempfile.TemporaryDirectory() as tmp:
+                        test=pathlib.Path(tmp)/"reference.json"
+                        test.write_text(json.dumps(data),encoding="utf-8")
+                        verified=lattice.settings(test)
+                    pathlib.Path(path).write_text(json.dumps(verified,indent=2),encoding="utf-8")
+                    self.reference_config.set(path)
+                    win.destroy()
+                except Exception as exc:messagebox.showerror("Invalid reference settings",str(exc),parent=win)
+            ttk.Button(frame,text="Save and use settings...",command=save).pack(anchor="e",pady=8)
+
         def _busy(self,on):
             self.launching=on
             self.start_button.configure(state="disabled" if on else "normal")
@@ -368,6 +423,7 @@ def make_gui():
                 except ValueError:
                     messagebox.showwarning("Invalid position","Enter a positive numeric measurement position (e.g. 37).")
                     return
+            reference=self.reference_config.get().strip().strip('"')
             self._prepare_new_job()
             self._log("Starting single-pass raw RASX analysis...")
             self.current_stage="Locating RASX folder"
@@ -380,6 +436,7 @@ def make_gui():
                     dest=self._destination(parent,"LMO_PF2D_"+scope)
                     args=["--source",str(raw),"--output",str(dest)]
                     if position is not None:args+=["--position",str(position)]
+                    if reference:args+=["--reference-config",reference]
                     cmd=([sys.executable,"--analyze",*args] if getattr(sys,"frozen",False) else
                          [sys.executable,str(pathlib.Path(__file__).resolve()),"--analyze",*args])
                     self.events.put(("launch",(cmd,dest,
@@ -394,6 +451,7 @@ def make_gui():
                 title="Select an earlier LMO_PF2D_BATCH folder containing saved maps",
                 initialdir=self.source.get() if pathlib.Path(self.source.get()).is_dir() else str(pathlib.Path.home()))
             if not directory:return
+            reference=self.reference_config.get().strip().strip('"')
             self._prepare_new_job()
             self.current_stage="Locating saved 2D maps"
             self.info.set(self.current_stage)
@@ -403,6 +461,7 @@ def make_gui():
                     parent=ensure_output_parent(self.output_parent.get())
                     dest=self._destination(parent,"LMO_PF2D_REPORTS")
                     args=["--source",str(source),"--output",str(dest),"--reports-only"]
+                    if reference:args+=["--reference-config",reference]
                     cmd=([sys.executable,"--analyze",*args] if getattr(sys,"frozen",False) else
                          [sys.executable,str(pathlib.Path(__file__).resolve()),"--analyze",*args])
                     self.events.put(("launch",(cmd,dest,

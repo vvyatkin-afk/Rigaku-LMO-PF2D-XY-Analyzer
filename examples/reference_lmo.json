@@ -1,0 +1,31 @@
+{
+  "material": "LMO (nominal pseudocubic reference)",
+  "wavelength_A": 1.5406,
+  "wavelength_confirmed": false,
+  "cell_A_deg": [
+    3.88,
+    3.88,
+    3.88,
+    90.0,
+    90.0,
+    90.0
+  ],
+  "reference_confirmed": false,
+  "calibration_confirmed": false,
+  "two_theta_offset_deg": 0.0,
+  "two_theta_systematic_sigma_deg": null,
+  "tape_azimuth_deg": null,
+  "cube_texture_azimuth_deg": null,
+  "assume_single_domain": false,
+  "angular_sigma_deg": null,
+  "indexing": [],
+  "detector_center_offset_px": [
+    0.0,
+    0.0
+  ],
+  "detector_distance_offset_mm": 0.0,
+  "secondary_wavelength_A": null,
+  "secondary_intensity_ratio": 0.5,
+  "allow_hypothetical_four_pole_cell": true,
+  "use_header_wavelength": true
+}
